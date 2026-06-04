@@ -5,7 +5,7 @@ load_dotenv()
 
 # Telegram Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
+ADMIN_IDS = [int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip()]
 ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID", 0))
 DISCUSSION_GROUP_ID = int(os.getenv("DISCUSSION_GROUP_ID", 0))
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", 0))
@@ -24,7 +24,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # Railway
 RAILWAY_VOLUME_MOUNT_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
-DATABASE_PATH = os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "giveaways.db")
+DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "giveaways.db"))
 EXPORTS_PATH = os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "exports")
 BACKUPS_PATH = os.path.join(RAILWAY_VOLUME_MOUNT_PATH, "backups")
 
