@@ -6,8 +6,8 @@ load_dotenv()
 # Telegram Bot
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(value.strip()) for value in os.getenv("ADMIN_IDS", "").split(",") if value.strip()]
-ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID", 0))
-DISCUSSION_GROUP_ID = int(os.getenv("DISCUSSION_GROUP_ID", 0))
+ANNOUNCEMENT_CHANNEL_ID = int(os.getenv("ANNOUNCEMENT_CHANNEL_ID", "-1003846885691"))
+DISCUSSION_GROUP_ID = int(os.getenv("DISCUSSION_GROUP_ID", "-1003994249946"))
 ADMIN_LOG_CHANNEL_ID = int(os.getenv("ADMIN_LOG_CHANNEL_ID", 0))
 
 # Giveaway Settings

@@ -3,9 +3,10 @@
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from config import ADMIN_IDS, DATABASE_PATH, RAILWAY_VOLUME_MOUNT_PATH
+from config import ADMIN_IDS, ANNOUNCEMENT_CHANNEL_ID, DATABASE_PATH, DISCUSSION_GROUP_ID, RAILWAY_VOLUME_MOUNT_PATH
 from database.database import db
 from services.pool_service import pool_service
+from utils.channel_utils import ANNOUNCEMENT_CHANNEL_USERNAME, classify_group_error, classify_telegram_error, start_discussion_read_test, verify_discussion_group
 from utils.permissions import is_admin
 from utils.recovery_manager import recovery_manager
 
@@ -89,6 +90,71 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@_admin_only
+async def channeltest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verify the bot can post to the configured announcement channel."""
+    try:
+        message = await context.bot.send_message(
+            chat_id=ANNOUNCEMENT_CHANNEL_ID,
+            text="✅ Channel Test Successful",
+        )
+        await update.message.reply_text(
+            "✅ Channel test passed.\n\n"
+            f"Channel:\n{ANNOUNCEMENT_CHANNEL_USERNAME}\n\n"
+            f"Channel ID:\n{ANNOUNCEMENT_CHANNEL_ID}\n\n"
+            f"Message ID:\n{message.message_id}"
+        )
+    except Exception as exc:
+        reason = classify_telegram_error(exc)
+        await update.message.reply_text(
+            "❌ Channel Test Failed\n\n"
+            f"Reason: {reason}\n"
+            f"Telegram error: {exc}"
+        )
+
+
+@_admin_only
+async def discussiontest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Verify the bot can access/send to the configured discussion group."""
+    can_access = "NO"
+    can_send = "NO"
+    try:
+        check = await verify_discussion_group(context.bot)
+        can_access = "YES" if check.ok else "NO"
+        if not check.ok:
+            await update.message.reply_text(
+                "❌ Discussion Group Test Failed\n\n"
+                f"Reason: {check.reason}\n"
+                f"Telegram error: {check.details}"
+            )
+            return
+        message = await context.bot.send_message(
+            chat_id=DISCUSSION_GROUP_ID,
+            text="✅ Discussion Group Test Successful",
+        )
+        can_send = "YES"
+        start_discussion_read_test(update.effective_user.id, update.effective_chat.id)
+        await update.message.reply_text(
+            "✅ Discussion group test started.\n\n"
+            f"Discussion Group ID:\n{DISCUSSION_GROUP_ID}\n\n"
+            f"Can Access:\n{can_access}\n\n"
+            f"Can Send Messages:\n{can_send}\n\n"
+            "Can Read Messages:\nPENDING LIVE TEST\n\n"
+            f"Test Message ID:\n{message.message_id}\n\n"
+            "Now send this phrase inside the discussion group or as a channel comment:\n"
+            "test trivia access"
+        )
+    except Exception as exc:
+        reason = classify_group_error(exc)
+        await update.message.reply_text(
+            "❌ Discussion Group Test Failed\n\n"
+            f"Reason: {reason}\n"
+            f"Can Access: {can_access}\n"
+            f"Can Send Messages: {can_send}\n"
+            f"Telegram error: {exc}"
+        )
+
+
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = db.diagnostics()
     await update.message.reply_text(
@@ -104,3 +170,5 @@ def register_admin_handlers(application):
     application.add_handler(CommandHandler("giveaway_status", giveaway_status))
     application.add_handler(CommandHandler("dashboard", dashboard))
     application.add_handler(CommandHandler("health", health))
+    application.add_handler(CommandHandler("channeltest", channeltest))
+    application.add_handler(CommandHandler("discussiontest", discussiontest))

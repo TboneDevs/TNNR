@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -85,6 +85,23 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 001")
+        if 2 not in applied:
+            self._migration_002(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (2, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 002")
+            applied.add(2)
+        if 3 not in applied:
+            self._migration_003(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (3, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 003")
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -121,6 +138,8 @@ class Database:
                 min_number INTEGER,
                 max_number INTEGER,
                 created_by INTEGER,
+                created_by_admin_id INTEGER,
+                active_status TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 ended_at TEXT
             );
@@ -130,10 +149,15 @@ class Database:
                 giveaway_id TEXT NOT NULL,
                 telegram_id INTEGER NOT NULL,
                 username TEXT,
+                first_name TEXT,
+                last_name TEXT,
                 display_name TEXT,
                 message_id INTEGER,
                 entry_text TEXT,
+                submitted_answer TEXT,
                 entry_number INTEGER,
+                guessed_number INTEGER,
+                source_type TEXT,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(giveaway_id, telegram_id)
             );
@@ -217,6 +241,46 @@ class Database:
             """
         )
 
+    def _migration_002(self, conn: sqlite3.Connection):
+        """Backfill announcement metadata columns for existing Railway databases."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(giveaways)")}
+        if "announcement_channel_id" not in columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN announcement_channel_id INTEGER")
+        if "announcement_message_id" not in columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN announcement_message_id INTEGER")
+        if "discussion_group_id" not in columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN discussion_group_id INTEGER")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_giveaways_announcement_channel ON giveaways(announcement_channel_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_giveaways_announcement_message ON giveaways(announcement_message_id)")
+
+    def _migration_003(self, conn: sqlite3.Connection):
+        """Add discussion-group and entry metadata used by giveaway access repair."""
+        giveaway_columns = {row[1] for row in conn.execute("PRAGMA table_info(giveaways)")}
+        if "discussion_group_id" not in giveaway_columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN discussion_group_id INTEGER")
+        if "created_by_admin_id" not in giveaway_columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN created_by_admin_id INTEGER")
+        if "active_status" not in giveaway_columns:
+            conn.execute("ALTER TABLE giveaways ADD COLUMN active_status TEXT")
+        conn.execute("UPDATE giveaways SET created_by_admin_id = COALESCE(created_by_admin_id, created_by)")
+        conn.execute("UPDATE giveaways SET active_status = COALESCE(active_status, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_giveaways_discussion_group ON giveaways(discussion_group_id)")
+
+        entry_columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+        for column, ddl in {
+            "first_name": "ALTER TABLE entries ADD COLUMN first_name TEXT",
+            "last_name": "ALTER TABLE entries ADD COLUMN last_name TEXT",
+            "submitted_answer": "ALTER TABLE entries ADD COLUMN submitted_answer TEXT",
+            "guessed_number": "ALTER TABLE entries ADD COLUMN guessed_number INTEGER",
+            "source_type": "ALTER TABLE entries ADD COLUMN source_type TEXT",
+        }.items():
+            if column not in entry_columns:
+                conn.execute(ddl)
+        conn.execute("UPDATE entries SET submitted_answer = COALESCE(submitted_answer, entry_text)")
+        conn.execute("UPDATE entries SET guessed_number = COALESCE(guessed_number, entry_number)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_source_type ON entries(source_type)")
+
+
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
         try:
@@ -233,6 +297,12 @@ class Database:
             missing = required_tables - existing
             if missing:
                 logger.error("Missing database tables: %s", ", ".join(sorted(missing)))
+                return False
+            giveaway_columns = {row[1] for row in self.execute_all("PRAGMA table_info(giveaways)")}
+            required_giveaway_columns = {"announcement_channel_id", "announcement_message_id", "discussion_group_id", "created_by_admin_id", "active_status"}
+            missing_columns = required_giveaway_columns - giveaway_columns
+            if missing_columns:
+                logger.error("Missing giveaway metadata columns: %s", ", ".join(sorted(missing_columns)))
                 return False
             return True
         except Exception as exc:

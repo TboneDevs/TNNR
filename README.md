@@ -42,8 +42,8 @@ python main.py
 | --- | --- | --- | --- |
 | `BOT_TOKEN` | Yes | none | Telegram BotFather token. |
 | `ADMIN_IDS` | Yes | none | Comma-separated Telegram user IDs that can run admin commands. |
-| `ANNOUNCEMENT_CHANNEL_ID` | Yes for announcements | `0` | Telegram channel ID used for public giveaway announcements. |
-| `DISCUSSION_GROUP_ID` | Yes for entry collection | `0` | Linked discussion group ID monitored for trivia/guess entries. |
+| `ANNOUNCEMENT_CHANNEL_ID` | Yes for announcements | `-1003846885691` | Telegram channel ID used for public giveaway announcements (`@TnnrCPM`). |
+| `DISCUSSION_GROUP_ID` | Yes for entry collection | `-1003994249946` | Linked discussion group ID monitored for trivia/guess entries and linked channel comments. |
 | `ADMIN_LOG_CHANNEL_ID` | Yes for admin alerting | `0` | Private channel/group for admin logs and critical alerts. |
 | `LOW_STOCK_ALERT_AMOUNT` | No | `25` | Available-account threshold that triggers low-stock warnings. |
 | `CLAIM_CODE_PREFIX` | No | `CPM` | Claim-code prefix, e.g. `CPM-ABC123`. |
@@ -63,16 +63,27 @@ See `.env.example` for a copy/paste template.
 - `/health` — lightweight online/health response.
 - `/dashboard` — active giveaway, winner, claim, and inventory summary.
 - `/giveaway_status` — recent giveaway list and entry counts.
-- `/trivia_create question|answer|prize` — create a trivia giveaway.
+- `/trivia_create question|answer|prize` — create a trivia giveaway and post the announcement to `@TnnrCPM`.
 - `/trivia_draw [GIVEAWAY_ID]` — select a trivia winner.
-- `/guess_create min max winning_number prize` — create a number-guess giveaway.
+- `/guess_create min max winning_number prize` — create a number-guess giveaway and post the announcement to `@TnnrCPM`.
 - `/guess_draw [GIVEAWAY_ID]` — select a number-guess winner.
+- `/spin_create win_odds prize` — create a spin giveaway and post the announcement to `@TnnrCPM`; odds may be `0.25` or `25`.
+- `/channeltest` — admin-only announcement channel posting test for `@TnnrCPM`.
+- `/discussiontest` — admin-only linked discussion group access/send/read test for `DISCUSSION_GROUP_ID`.
 - `/giveaway_stop GIVEAWAY_ID` — stop a giveaway.
 - `/admin_upload_pool` — request a `.txt` pool upload in `email:password` format.
 - `/pool_add_single email@example.com:password` — add one account to the pool.
 - `/pool_status` — inventory status counts.
 - `/pool_mark_invalid email@example.com` — mark an account invalid.
 - `/claimcode CPM-XXXXXX` — admins can look up a code; users redeem their own code.
+
+## Giveaway announcement channel flow
+
+Giveaway creation commands are intentionally run from a bot DM or the private admin log channel, not from the public announcement channel, public groups, or the linked discussion group. After validation, the bot verifies it can access/post to `@TnnrCPM` (`ANNOUNCEMENT_CHANNEL_ID=-1003846885691`) and, for trivia/number guess flows, verifies access to the linked discussion group (`DISCUSSION_GROUP_ID=-1003994249946`). It then posts the announcement, stores `announcement_channel_id`, `announcement_message_id`, and `discussion_group_id` on the giveaway row, and confirms the giveaway ID plus Telegram message ID back to the admin.
+
+If channel posting fails, the bot does not create the giveaway and replies with one of the deployment/debug categories: `BOT_NOT_ADMIN`, `CHANNEL_NOT_FOUND`, `TELEGRAM_API_ERROR`, or `INSUFFICIENT_PERMISSIONS`.
+
+Run `/channeltest` and `/discussiontest` in a bot DM or the admin log channel after deployment. `/channeltest` confirms the bot can post to `@TnnrCPM`; `/discussiontest` confirms access/send capability and starts the live read test phrase. A failure returns the exact Telegram error category and message.
 
 ## Database tables
 
@@ -109,3 +120,13 @@ python main.py
 ```
 
 `BOT_TOKEN` is required to actually run the Telegram polling process. Unit tests use a temporary database and do not require Telegram credentials.
+
+
+### Discussion group entry handling
+
+Trivia and number guess entries are collected silently from `DISCUSSION_GROUP_ID=-1003994249946`, including normal linked-discussion messages and channel comments routed through that discussion group. Trivia answers are normalized by stripping, lowercasing, and collapsing repeated spaces before comparison. Correct trivia entries and valid in-range number guesses are stored with source metadata and duplicates/incorrect/invalid submissions are ignored silently.
+
+Admin tests:
+
+- `/channeltest` posts `✅ Channel Test Successful` to `@TnnrCPM` and returns the channel message ID.
+- `/discussiontest` verifies discussion group access, sends `✅ Discussion Group Test Successful`, and starts the live read phrase test. Send `test trivia access` in the discussion group or as a channel comment to confirm the bot can read routed comments/messages.
