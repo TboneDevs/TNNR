@@ -122,15 +122,31 @@ async def _send_redemption_admin_log(context: ContextTypes.DEFAULT_TYPE, user, r
         return
 
 
+def _extract_claim_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Extract the full user-entered code from a Telegram command message.
+
+    PTB context.args is whitespace-split, which is fine for simple inputs but
+    loses the original shape of pasted codes with newlines, bot-name command
+    suffixes, and unusual spacing.  Prefer the raw message text after the first
+    command token, then fall back to joined args for test doubles/edge cases.
+    """
+    text = getattr(getattr(update, "message", None), "text", None) or ""
+    if text.strip():
+        parts = text.strip().split(maxsplit=1)
+        if len(parts) > 1 and parts[0].lower().startswith("/claimcode"):
+            return parts[1].strip()
+    return " ".join(getattr(context, "args", []) or []).strip()
+
+
 async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+    raw_code = _extract_claim_code_input(update, context)
+    if not raw_code:
         await update.message.reply_text("Usage: /claimcode CPM-XXXXXX")
         return
     chat = update.effective_chat
     if getattr(chat, "type", None) != "private":
         await update.message.reply_text("❌ Claim codes can only be redeemed in a private DM with the bot.")
         return
-    raw_code = " ".join(context.args)
     user = update.effective_user
     if is_admin(user.id):
         status = claim_service.get_claim_status(raw_code)

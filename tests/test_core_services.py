@@ -713,3 +713,89 @@ def test_start_and_help_include_mycodes_guidance(tmp_path, monkeypatch):
     assert "User Commands:" in message.replies[-1]
     assert "/mycodes" in message.replies[-1]
     assert "/claimcode CPM-XXXXX" in message.replies[-1]
+
+
+def test_claim_code_normalization_handles_unicode_and_hidden_copy_paste(tmp_path, monkeypatch):
+    load_app(tmp_path, monkeypatch)
+    from utils.claimcode import claim_code_search_key, normalize_claim_code
+
+    assert normalize_claim_code("CPM–ABC123") == "CPM-ABC123"
+    assert normalize_claim_code("CPM—ABC123") == "CPM-ABC123"
+    assert normalize_claim_code("\u200bCPM\u00a0-\u00a0ABC123\ufeff") == "CPM-ABC123"
+    assert normalize_claim_code("CPM\nABC123") == "CPM-ABC123"
+    assert claim_code_search_key("CPM—ABC123") == "CPMABC123"
+
+
+def test_claim_lookup_finds_code_registered_only_in_claim_codes_table(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["claimcodes@example.com:p1"], 1, "admin")
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("CLAIM-CODES-TABLE", "trivia", "1 Account", "winner_selected", 1))
+    cur = db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize) VALUES (?, ?, ?, ?, ?)", ("LEGACYWIN1", "CLAIM-CODES-TABLE", 901, "winner", "1 Account"))
+    winner_id = cur.lastrowid
+    db.execute("INSERT INTO claim_codes (code, winner_id, telegram_id, prize, status) VALUES (?, ?, ?, ?, ?)", ("CPM-ABC123", winner_id, 901, "1 Account", "unclaimed"))
+    db.commit()
+
+    result = claim_service.redeem_claim_code("cpm—abc123", 901, "winner")
+
+    assert result["success"] is True
+    assert result["claim_code"] == "LEGACYWIN1"
+    assert result["accounts"] == ["claimcodes@example.com:p1"]
+
+
+def test_claimcode_handler_extracts_raw_text_with_bot_suffix_and_newline(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claimcode
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["rawtext@example.com:p1"], 1, "admin")
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("RAW-TEXT", "trivia", "1 Account", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize) VALUES (?, ?, ?, ?, ?)", ("CPM-ABC123", "RAW-TEXT", 902, "winner", "1 Account"))
+    db.commit()
+
+    update, message = _make_update("/claimcode@AccountTool_Bot\nCPM\u00a0—\u00a0ABC123", chat_type="private", user_id=902)
+    update.effective_user.username = "winner"
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(claimcode(update, context))
+
+    assert "✅ Prize Delivered Successfully" in message.replies[-1]
+    assert "rawtext@example.com:p1" in message.replies[-1]
+
+
+def test_claim_validation_distinguishes_not_found_from_malformed(tmp_path, monkeypatch):
+    load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+
+    plausible = claim_service.redeem_claim_code("CPM-NOT999", 903, "user")
+    malformed = claim_service.redeem_claim_code("not a cpm code", 903, "user")
+
+    assert plausible["success"] is False
+    assert plausible["message"].startswith("❌ Claim code not found.")
+    assert malformed["success"] is False
+    assert malformed["message"].startswith("❌ Invalid claim code.")
+
+
+def test_mycodes_displays_canonical_redeemable_format_for_old_codes(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import mycodes
+
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("MY-OLD-FORMAT", "trivia", "1 Account", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPMABC123", "MY-OLD-FORMAT", 904, "winner", "1 Account", 0))
+    db.commit()
+
+    update, message = _make_update("/mycodes", chat_type="private", user_id=904)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(mycodes(update, context))
+
+    assert "CPM-ABC123" in message.replies[-1]
+    assert "/claimcode CPM-ABC123" in message.replies[-1]

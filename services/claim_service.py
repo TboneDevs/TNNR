@@ -5,7 +5,7 @@ from datetime import datetime
 from database.database import db
 from services.pool_service import pool_service
 from utils.audit_logger import audit_log
-from utils.claimcode import claim_code_search_key, normalize_claim_code
+from utils.claimcode import claim_code_search_key, is_plausible_claim_code, normalize_claim_code
 
 logger = logging.getLogger('tnnr.services.claim')
 
@@ -16,28 +16,59 @@ class ClaimService:
     """Handles claim-code listing, validation, redemption, and account delivery."""
 
     @staticmethod
+    def _winner_select_sql() -> str:
+        return """SELECT id, claim_code, giveaway_id, telegram_id, username, display_name,
+                         prize, claimed_status, created_at, claimed_at
+                  FROM winners"""
+
+    @staticmethod
+    def _claim_code_sql_key(column: str) -> str:
+        return f"REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(UPPER({column}), '-', ''), '_', ''), ' ', ''), char(10), ''), char(13), '')"
+
+    @staticmethod
     def _find_winner_by_code(claim_code: str):
-        """Find a winner by exact normalized code or old/new punctuation variants."""
+        """Find a winner by exact, canonical, compact, or claim_codes-table match."""
         canonical_code = normalize_claim_code(claim_code)
         search_key = claim_code_search_key(canonical_code or claim_code)
         winner = None
 
         if canonical_code:
             winner = db.execute_one(
-                """SELECT id, claim_code, giveaway_id, telegram_id, username, display_name,
-                          prize, claimed_status, created_at, claimed_at
-                   FROM winners WHERE UPPER(claim_code) = ?""",
+                ClaimService._winner_select_sql() + " WHERE UPPER(claim_code) = ?",
                 (canonical_code,),
             )
 
         if not winner and search_key:
             winner = db.execute_one(
-                """SELECT id, claim_code, giveaway_id, telegram_id, username, display_name,
-                          prize, claimed_status, created_at, claimed_at
-                   FROM winners
-                   WHERE REPLACE(REPLACE(REPLACE(UPPER(claim_code), '-', ''), '_', ''), ' ', '') = ?""",
+                ClaimService._winner_select_sql()
+                + f" WHERE {ClaimService._claim_code_sql_key('claim_code')} = ?",
                 (search_key,),
             )
+
+        if not winner and search_key:
+            winner = db.execute_one(
+                ClaimService._winner_select_sql()
+                + " WHERE id = ("
+                + "SELECT winner_id FROM claim_codes "
+                + f"WHERE winner_id IS NOT NULL AND {ClaimService._claim_code_sql_key('code')} = ? "
+                + "ORDER BY id DESC LIMIT 1)",
+                (search_key,),
+            )
+
+        # Final Python-side fallback handles Unicode dash/zero-width artifacts in
+        # old DB rows that SQLite REPLACE expressions cannot normalize.
+        if not winner and search_key:
+            for row in db.execute_all(ClaimService._winner_select_sql()):
+                if claim_code_search_key(row[1]) == search_key:
+                    winner = row
+                    break
+
+        if not winner and search_key:
+            for row in db.execute_all("SELECT winner_id, code FROM claim_codes WHERE winner_id IS NOT NULL ORDER BY id DESC"):
+                if claim_code_search_key(row[1]) == search_key:
+                    winner = db.execute_one(ClaimService._winner_select_sql() + " WHERE id = ?", (row[0],))
+                    if winner:
+                        break
 
         return canonical_code, search_key, winner
 
@@ -82,7 +113,8 @@ class ClaimService:
                 continue
             codes.append({
                 'winner_id': row[0],
-                'claim_code': row[1],
+                'claim_code': normalize_claim_code(row[1]) or row[1],
+                'stored_claim_code': row[1],
                 'prize': row[2],
                 'giveaway_id': row[3],
                 'won_at': row[4],
@@ -100,10 +132,11 @@ class ClaimService:
             canonical_code, search_key, winner = ClaimService._find_winner_by_code(claim_code)
 
             if not winner:
-                if canonical_code:
+                if canonical_code or is_plausible_claim_code(claim_code):
                     message = '❌ Claim code not found.\n\nRun /mycodes to view your unclaimed claim codes.'
                 else:
                     message = '❌ Invalid claim code.\n\nExample format:\nCPM-ABC123\n\nYou can also run /mycodes to view your available codes.'
+                logger.info("Claim code lookup failed: canonical=%s search_key_present=%s plausible=%s", canonical_code, bool(search_key), is_plausible_claim_code(claim_code))
                 return {'valid': False, 'message': message, 'winner': None}
 
             status = ClaimService._claim_code_status(winner[0], winner[1])

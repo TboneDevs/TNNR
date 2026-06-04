@@ -6,56 +6,87 @@ import unicodedata
 from config import CLAIM_CODE_LENGTH, CLAIM_CODE_PREFIX
 
 
+DASH_TRANSLATION = str.maketrans({
+    "‐": "-",  # hyphen
+    "‑": "-",  # non-breaking hyphen
+    "‒": "-",  # figure dash
+    "–": "-",  # en dash
+    "—": "-",  # em dash
+    "―": "-",  # horizontal bar
+    "−": "-",  # minus sign
+    "﹘": "-",
+    "﹣": "-",
+    "－": "-",
+})
+
+
 def _normalized_prefix() -> str:
     return str(CLAIM_CODE_PREFIX).strip().upper()
 
 
 def _strip_hidden(value: str) -> str:
-    return (
-        unicodedata.normalize("NFKC", value)
-        .replace("\u200b", "")
-        .replace("\u200c", "")
-        .replace("\u200d", "")
-        .replace("\ufeff", "")
-    )
+    """Normalize copy/paste artifacts without changing visible letters/digits."""
+    normalized = unicodedata.normalize("NFKC", value).translate(DASH_TRANSLATION)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) not in {"Cf", "Cc"})
 
 
-def claim_code_search_key(code: str) -> str:
-    """Return a punctuation-insensitive lookup key for stored/user codes."""
+def _clean_for_matching(code: str) -> str:
     if not isinstance(code, str):
         return ""
     cleaned = _strip_hidden(code).strip().upper()
     cleaned = cleaned.replace("_", "-")
     cleaned = re.sub(r"\s+", "", cleaned)
     cleaned = re.sub(r"-+", "-", cleaned)
-    return cleaned.replace("-", "")
+    return cleaned
+
+
+def claim_code_search_key(code: str) -> str:
+    """Return a separator-insensitive lookup key for stored/user codes.
+
+    This intentionally removes separators after Unicode normalization so these
+    all match the same DB record: CPM-ABC123, CPMABC123, CPM_ABC123, and
+    CPM–ABC123.  It is used only for lookup, not for displaying the code.
+    """
+    cleaned = _clean_for_matching(code)
+    return re.sub(r"[^A-Z0-9]", "", cleaned)
 
 
 def normalize_claim_code(code: str) -> str | None:
-    """Return the canonical PREFIX-SUFFIX form for a safely formatted code.
+    """Return canonical PREFIX-SUFFIX for safely formatted user input.
 
     Accepts harmless Telegram/copy-paste variations such as lowercase text,
-    underscores, spaces around separators, missing hyphen after the prefix, and
-    hidden zero-width characters.  It does not require the DB to store exactly
-    this spelling; service lookups also compare punctuation-insensitive keys.
+    underscores, spaces/newlines around separators, Unicode dash variants,
+    missing hyphen after the prefix, non-breaking spaces, and hidden zero-width
+    characters.  Strict length checks are applied only after canonicalization;
+    service lookups also compare DB records by separator-insensitive keys so old
+    stored formats remain redeemable.
     """
-    if not isinstance(code, str):
+    cleaned = _clean_for_matching(code)
+    if not cleaned:
         return None
-
-    cleaned = _strip_hidden(code).strip().upper()
-    cleaned = cleaned.replace("_", "-")
-    cleaned = re.sub(r"\s+", "", cleaned)
-    cleaned = re.sub(r"-+", "-", cleaned)
 
     prefix = _normalized_prefix()
-    if cleaned.startswith(prefix) and not cleaned.startswith(prefix + "-"):
-        cleaned = prefix + "-" + cleaned[len(prefix):]
-
-    pattern = re.compile(rf"^{re.escape(prefix)}-([A-Z0-9]{{{CLAIM_CODE_LENGTH}}})$")
-    match = pattern.fullmatch(cleaned)
-    if not match:
+    prefix_key = claim_code_search_key(prefix)
+    compact = claim_code_search_key(cleaned)
+    if not compact.startswith(prefix_key):
         return None
-    return f"{prefix}-{match.group(1)}"
+
+    suffix = compact[len(prefix_key):]
+    if len(suffix) != CLAIM_CODE_LENGTH or not re.fullmatch(r"[A-Z0-9]+", suffix):
+        return None
+    return f"{prefix}-{suffix}"
+
+
+def is_plausible_claim_code(code: str) -> bool:
+    """Return whether input looks like an attempted claim code.
+
+    Used only to choose between an "invalid format" response and a "not found"
+    response.  Database lookup still runs first so existing DB records are not
+    rejected just because they use an older format or length.
+    """
+    compact = claim_code_search_key(code)
+    prefix = claim_code_search_key(_normalized_prefix())
+    return bool(compact and compact.startswith(prefix))
 
 
 def generate_claim_code() -> str:
