@@ -1,32 +1,52 @@
+import re
 import secrets
 import string
-from config import CLAIM_CODE_PREFIX, CLAIM_CODE_LENGTH
+import unicodedata
+
+from config import CLAIM_CODE_LENGTH, CLAIM_CODE_PREFIX
+
+
+def _normalized_prefix() -> str:
+    return str(CLAIM_CODE_PREFIX).strip().upper()
+
+
+def normalize_claim_code(code: str) -> str | None:
+    """Return the canonical PREFIX-SUFFIX form for user-entered claim codes.
+
+    Telegram users commonly copy codes with lowercase letters, leading/trailing
+    whitespace, zero-width characters, or spaces around the hyphen.  Redemption
+    lookups must accept those harmless variations while still rejecting malformed
+    values.
+    """
+    if not isinstance(code, str):
+        return None
+
+    cleaned = unicodedata.normalize("NFKC", code)
+    cleaned = cleaned.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    cleaned = cleaned.strip().upper()
+    cleaned = re.sub(r"\s*-\s*", "-", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+
+    prefix = _normalized_prefix()
+    pattern = re.compile(rf"^{re.escape(prefix)}(?:-|\s)?([A-Z0-9]{{{CLAIM_CODE_LENGTH}}})$")
+    match = pattern.fullmatch(cleaned)
+    if not match:
+        return None
+    return f"{prefix}-{match.group(1)}"
+
 
 def generate_claim_code() -> str:
+    """Generate a secure, random canonical claim code.
+
+    Format: PREFIX-XXXXXX (e.g., CPM-A1B2C3).  Generated codes are uppercase
+    so the value sent to winners, stored in the DB, and shown in admin logs all
+    share one canonical representation.
     """
-    Generate a secure, random claim code.
-    Uses secrets module for cryptographic security.
-    
-    Format: PREFIX-XXXXXX (e.g., CPM-A1B2C3)
-    """
-    characters = string.ascii_letters + string.digits
-    code = ''.join(secrets.choice(characters) for _ in range(CLAIM_CODE_LENGTH))
-    return f"{CLAIM_CODE_PREFIX}-{code}"
+    characters = string.ascii_uppercase + string.digits
+    suffix = ''.join(secrets.choice(characters) for _ in range(CLAIM_CODE_LENGTH))
+    return f"{_normalized_prefix()}-{suffix}"
+
 
 def validate_claim_code_format(code: str) -> bool:
-    """Validate claim code format."""
-    if not code or not isinstance(code, str):
-        return False
-    
-    parts = code.split('-')
-    if len(parts) != 2:
-        return False
-    
-    prefix, claim_part = parts
-    if prefix != CLAIM_CODE_PREFIX:
-        return False
-    
-    if len(claim_part) != CLAIM_CODE_LENGTH:
-        return False
-    
-    return all(c in string.ascii_letters + string.digits for c in claim_part)
+    """Validate claim code format after safe user-input normalization."""
+    return normalize_claim_code(code) is not None

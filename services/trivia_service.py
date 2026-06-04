@@ -133,12 +133,18 @@ class TriviaService:
             prize = giveaway[0]
             claim_code = generate_claim_code()
 
-            db.execute(
+            winner_cursor = db.execute(
                 """INSERT INTO winners
                    (claim_code, giveaway_id, telegram_id, username, display_name, prize, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (claim_code, giveaway_id, winner_entry[1], winner_entry[2],
                  winner_entry[3], prize, datetime.now())
+            )
+            db.execute(
+                """INSERT OR IGNORE INTO claim_codes
+                   (code, winner_id, telegram_id, prize, status, created_at)
+                   VALUES (?, ?, ?, ?, 'unclaimed', ?)""",
+                (claim_code, winner_cursor.lastrowid, winner_entry[1], prize, datetime.now())
             )
             db.commit()
             db.execute(

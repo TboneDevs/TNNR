@@ -3,7 +3,7 @@ from datetime import datetime
 from database.database import db
 from services.pool_service import pool_service
 from utils.audit_logger import audit_log
-from config import CLAIM_CODE_PREFIX
+from utils.claimcode import normalize_claim_code
 
 logger = logging.getLogger('tnnr.services.claim')
 
@@ -17,55 +17,53 @@ class ClaimService:
         Returns: {'valid': bool, 'message': str, 'winner': dict}
         """
         try:
-            # Check code format
-            if not claim_code.startswith(CLAIM_CODE_PREFIX):
+            canonical_code = normalize_claim_code(claim_code)
+            if not canonical_code:
                 return {
                     'valid': False,
                     'message': 'Invalid claim code format',
                     'winner': None
                 }
-            
-            # Check if code exists
+
             winner = db.execute_one(
-                """SELECT id, telegram_id, username, display_name, prize, claimed_status, giveaway_id
-                   FROM winners WHERE claim_code = ?""",
-                (claim_code,)
+                """SELECT id, claim_code, telegram_id, username, display_name, prize, claimed_status, giveaway_id
+                   FROM winners WHERE UPPER(claim_code) = ?""",
+                (canonical_code,)
             )
-            
+
             if not winner:
                 return {
                     'valid': False,
                     'message': 'Claim code not found',
                     'winner': None
                 }
-            
-            # Check ownership
-            if winner[1] != telegram_id:
-                logger.warning(f"Ownership validation failed: {telegram_id} tried to claim code for {winner[1]}")
+
+            if winner[2] != telegram_id:
+                logger.warning(f"Ownership validation failed: {telegram_id} tried to claim code for {winner[2]}")
                 return {
                     'valid': False,
                     'message': 'This claim code belongs to another account',
                     'winner': None
                 }
-            
-            # Check if already claimed
-            if winner[5] == 1:
+
+            if winner[6] == 1:
                 return {
                     'valid': False,
                     'message': 'This claim code has already been redeemed',
                     'winner': None
                 }
-            
+
             return {
                 'valid': True,
                 'message': 'Claim code valid',
                 'winner': {
                     'id': winner[0],
-                    'telegram_id': winner[1],
-                    'username': winner[2],
-                    'display_name': winner[3],
-                    'prize': winner[4],
-                    'giveaway_id': winner[6]
+                    'claim_code': winner[1],
+                    'telegram_id': winner[2],
+                    'username': winner[3],
+                    'display_name': winner[4],
+                    'prize': winner[5],
+                    'giveaway_id': winner[7]
                 }
             }
         except Exception as e:
@@ -94,6 +92,7 @@ class ClaimService:
                 }
             
             winner = validation['winner']
+            stored_claim_code = winner['claim_code']
             prize_text = winner['prize']
             
             # Parse prize (e.g., "5 Accounts")
@@ -123,7 +122,7 @@ class ClaimService:
             
             # Mark accounts as delivered
             account_ids = [acc[0] for acc in accounts]
-            if not pool_service.mark_accounts_delivered(claim_code, account_ids):
+            if not pool_service.mark_accounts_delivered(stored_claim_code, account_ids):
                 pool_service.revert_reserved_accounts(account_ids)
                 return {
                     'success': False,
@@ -135,8 +134,8 @@ class ClaimService:
             db.execute(
                 """UPDATE winners 
                    SET claimed_status = 1, claimed_at = ? 
-                   WHERE claim_code = ?""",
-                (datetime.now(), claim_code)
+                   WHERE id = ?""",
+                (datetime.now(), winner['id'])
             )
             db.commit()
             
@@ -145,7 +144,13 @@ class ClaimService:
                 """INSERT INTO redemptions 
                    (claim_code, telegram_id, prize, accounts_delivered, redeemed_at)
                    VALUES (?, ?, ?, ?, ?)""",
-                (claim_code, telegram_id, prize_text, account_count, datetime.now())
+                (stored_claim_code, telegram_id, prize_text, account_count, datetime.now())
+            )
+            db.execute(
+                """UPDATE claim_codes
+                   SET status = 'redeemed', redeemed_at = ?
+                   WHERE UPPER(code) = UPPER(?)""",
+                (datetime.now(), stored_claim_code)
             )
             db.commit()
             
@@ -154,11 +159,11 @@ class ClaimService:
                 action='CLAIM_REDEEMED',
                 actor_id=telegram_id,
                 actor_name=username,
-                details=f"Prize: {prize_text}, Code: {claim_code}",
+                details=f"Prize: {prize_text}, Code: {stored_claim_code}",
                 result='SUCCESS'
             )
             
-            logger.info(f"Claim redeemed: {claim_code} by {telegram_id}")
+            logger.info(f"Claim redeemed: {stored_claim_code} by {telegram_id}")
             
             # Format accounts for response
             formatted_accounts = [f"{acc[1]}:{acc[2]}" for acc in accounts]
@@ -178,17 +183,20 @@ class ClaimService:
     
     @staticmethod
     def get_claim_status(claim_code: str) -> dict:
-        """Get status of a claim code."""
+        """Get status of a claim code using the same normalization as redemption."""
         try:
+            canonical_code = normalize_claim_code(claim_code)
+            if not canonical_code:
+                return {'found': False}
             winner = db.execute_one(
                 """SELECT claim_code, telegram_id, username, prize, claimed_status, claimed_at
-                   FROM winners WHERE claim_code = ?""",
-                (claim_code,)
+                   FROM winners WHERE UPPER(claim_code) = ?""",
+                (canonical_code,)
             )
-            
+
             if not winner:
                 return {'found': False}
-            
+
             return {
                 'found': True,
                 'code': winner[0],

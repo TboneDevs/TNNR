@@ -101,12 +101,19 @@ class LotteryService:
                 # Generate claim code
                 claim_code = generate_claim_code()
 
-                # Create winner record
-                cursor = db.execute(
+                # Create winner record and mirror the code in claim_codes for
+                # durable lookup/auditing compatibility.
+                winner_cursor = db.execute(
                     """INSERT INTO winners
                        (claim_code, giveaway_id, telegram_id, username, display_name, prize, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (claim_code, giveaway_id, telegram_id, username, display_name, prize, datetime.now())
+                )
+                db.execute(
+                    """INSERT OR IGNORE INTO claim_codes
+                       (code, winner_id, telegram_id, prize, status, created_at)
+                       VALUES (?, ?, ?, ?, 'unclaimed', ?)""",
+                    (claim_code, winner_cursor.lastrowid, telegram_id, prize, datetime.now())
                 )
                 db.commit()
 

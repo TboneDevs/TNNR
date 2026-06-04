@@ -5,6 +5,7 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from services.claim_service import claim_service
 from services.pool_service import pool_service
+from utils.claimcode import normalize_claim_code
 from utils.permissions import is_admin
 
 AWAITING_POOL_UPLOAD = set()
@@ -29,7 +30,11 @@ async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if getattr(chat, "type", None) != "private":
         await update.message.reply_text("❌ Claim codes can only be redeemed in a private DM with the bot.")
         return
-    code = context.args[0].strip()
+    raw_code = " ".join(context.args)
+    code = normalize_claim_code(raw_code)
+    if not code:
+        await update.message.reply_text("Invalid claim code format")
+        return
     user = update.effective_user
     if is_admin(user.id):
         status = claim_service.get_claim_status(code)

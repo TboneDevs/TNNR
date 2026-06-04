@@ -456,3 +456,119 @@ def test_claimcode_redeem_is_blocked_outside_private_dm(tmp_path, monkeypatch):
     assert message.replies[-1] == "❌ Claim codes can only be redeemed in a private DM with the bot."
     assert "CPM-PRIVATE" not in message.replies[-1]
     assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-PRIVATE",))[0] == 0
+
+
+def test_claim_code_normalization_accepts_safe_variations(tmp_path, monkeypatch):
+    load_app(tmp_path, monkeypatch)
+    from utils.claimcode import normalize_claim_code, validate_claim_code_format
+
+    assert normalize_claim_code("CPM-ABC123") == "CPM-ABC123"
+    assert normalize_claim_code(" cpm-abc123 ") == "CPM-ABC123"
+    assert normalize_claim_code("cPm - aBc123") == "CPM-ABC123"
+    assert normalize_claim_code("CPM ABC123") == "CPM-ABC123"
+    assert normalize_claim_code("CPMABC123") == "CPM-ABC123"
+    assert validate_claim_code_format(" cpm - abc123 ") is True
+    assert normalize_claim_code("CPM-ABC12") is None
+    assert normalize_claim_code("BAD-ABC123") is None
+
+
+def test_claim_redemption_normalizes_lookup_and_preserves_stored_code(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["norm@example.com:p1"], 1, "admin")
+    db.execute(
+        """INSERT INTO giveaways (giveaway_id, type, prize, status, created_by)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("TRIVIA-NORM", "trivia", "1 Account", "winner_selected", 1),
+    )
+    db.execute(
+        """INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("CPM-AbC123", "TRIVIA-NORM", 10, "winner", "1 Account"),
+    )
+    db.commit()
+
+    redeemed = claim_service.redeem_claim_code("  cpm - abc123  ", 10, "winner")
+
+    assert redeemed["success"] is True
+    assert redeemed["accounts"] == ["norm@example.com:p1"]
+    assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-AbC123",))[0] == 1
+    assert db.execute_one("SELECT claim_code FROM redemptions")[0] == "CPM-AbC123"
+    assert db.execute_one("SELECT assigned_claim_code FROM account_pool WHERE email = ?", ("norm@example.com",))[0] == "CPM-AbC123"
+
+
+def test_claim_redemption_reports_already_redeemed_after_normalized_lookup(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+
+    db.execute(
+        """INSERT INTO giveaways (giveaway_id, type, prize, status, created_by)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("TRIVIA-USED", "trivia", "1 Account", "winner_selected", 1),
+    )
+    db.execute(
+        """INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("CPM-AbC124", "TRIVIA-USED", 10, "winner", "1 Account", 1),
+    )
+    db.commit()
+
+    result = claim_service.redeem_claim_code("cpm-abc124", 10, "winner")
+
+    assert result["success"] is False
+    assert result["message"] == "This claim code has already been redeemed"
+
+
+def test_claimcode_handler_joins_spaced_code_args_in_private_dm(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claimcode
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["handler@example.com:p1"], 1, "admin")
+    db.execute(
+        """INSERT INTO giveaways (giveaway_id, type, prize, status, created_by)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("TRIVIA-HANDLER", "trivia", "1 Account", "winner_selected", 1),
+    )
+    db.execute(
+        """INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("CPM-AbC125", "TRIVIA-HANDLER", 55, "winner", "1 Account"),
+    )
+    db.commit()
+
+    update, message = _make_update("/claimcode cpm - abc125", chat_type="private", user_id=55)
+    update.effective_user.username = "winner"
+    context = types.SimpleNamespace(args=["cpm", "-", "abc125"], bot=_FakeBot())
+
+    asyncio.run(claimcode(update, context))
+
+    assert "✅ Prize Delivered Successfully" in message.replies[-1]
+    assert "handler@example.com:p1" in message.replies[-1]
+    assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-AbC125",))[0] == 1
+
+
+def test_winner_generated_claim_code_is_registered_and_redeemable_case_insensitively(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.guess_service import guess_service
+    from services.claim_service import claim_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["draw@example.com:p1"], 1, "admin")
+    gid = guess_service.create_giveaway(1, 10, 7, "1 Account", 1, "admin")
+    assert guess_service.submit_entry(gid, 77, "drawinner", "Draw Winner", 7001, "7")
+
+    result = guess_service.select_winner(gid, 1, "admin")
+    code = result["claim_code"]
+
+    assert db.execute_one("SELECT claim_code FROM winners WHERE claim_code = ?", (code,))[0] == code
+    assert db.execute_one("SELECT code FROM claim_codes WHERE code = ?", (code,))[0] == code
+    redeemed = claim_service.redeem_claim_code(code.lower(), 77, "drawinner")
+    assert redeemed["success"] is True
+    assert redeemed["accounts"] == ["draw@example.com:p1"]
+    assert db.execute_one("SELECT status FROM claim_codes WHERE code = ?", (code,))[0] == "redeemed"
