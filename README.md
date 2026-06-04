@@ -75,7 +75,8 @@ See `.env.example` for a copy/paste template.
 - `/pool_add_single email@example.com:password` — add one account to the pool.
 - `/pool_status` — inventory status counts.
 - `/pool_mark_invalid email@example.com` — mark an account invalid.
-- `/claimcode CPM-XXXXXX` — admins can look up a code; users redeem their own code.
+- `/mycodes` — normal users can view their own unclaimed giveaway claim codes.
+- `/claimcode CPM-XXXXXX` — admins can look up a code; users redeem their own code from a private DM.
 
 ## Giveaway announcement channel flow
 
@@ -103,10 +104,10 @@ Malformed lines, duplicate emails, and invalid email addresses are skipped. Pass
 ## Claim process
 
 1. A giveaway service selects a winner and creates a unique claim code.
-2. Public winner announcements identify the winner by available name, username, and Telegram ID, but never include the claim code.
-3. The bot sends the claim code and `/claimcode CPM-XXXXXX` redemption instruction only to the winner by private DM.
-4. The winner must redeem the code in a private DM with the bot; public/group redemption attempts are blocked to keep claim codes private.
-5. The bot validates ownership, stock, and previous redemption state.
+2. Public winner announcements and winner DMs tell the winner to start `@AccountTool_Bot`, run `/mycodes`, and redeem with `/claimcode CPM-XXXXX`.
+3. `/mycodes` is user-safe and lookup-only: it shows only unclaimed codes for the Telegram account running the command and never exposes account credentials, reserves accounts, or marks codes claimed.
+4. `/claimcode` must be run in a private DM. The parser accepts safe case/format variations such as `CPM-ABC123`, `cpm-abc123`, `CPMABC123`, and `CPM_ABC123`.
+5. The bot validates Telegram ownership, stock, and previous redemption state.
 6. Accounts are reserved before delivery and marked delivered only after the redemption flow completes.
 7. Redemptions and critical actions are written to the audit log.
 

@@ -1,14 +1,17 @@
-"""Telegram claim and pool handlers."""
+"""Telegram claim, user, and pool handlers."""
+
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
+from config import ADMIN_LOG_CHANNEL_ID
 from services.claim_service import claim_service
 from services.pool_service import pool_service
-from utils.claimcode import normalize_claim_code
 from utils.permissions import is_admin
 
 AWAITING_POOL_UPLOAD = set()
+BOT_USERNAME = "@AccountTool_Bot"
 
 
 def _admin_only(func):
@@ -22,6 +25,103 @@ def _admin_only(func):
     return wrapper
 
 
+def _format_won_at(value) -> str:
+    if not value:
+        return "Unknown"
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %I:%M %p").replace(" 0", " ")
+    text = str(value)
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text.split("+")[0], fmt).strftime("%Y-%m-%d %I:%M %p").replace(" 0", " ")
+        except ValueError:
+            continue
+    return text
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to TNNR Giveaways.\n\n"
+        "🎟️ If you won a giveaway, run:\n\n"
+        "/mycodes\n\n"
+        "to view your unclaimed claim codes.\n\n"
+        "Then redeem using:\n\n"
+        "/claimcode CPM-XXXXX"
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "TNNR Bot Help\n\n"
+        "User Commands:\n\n"
+        "/mycodes\n"
+        "View your unclaimed giveaway claim codes.\n\n"
+        "/claimcode CPM-XXXXX\n"
+        "Redeem a claim code and automatically receive your prize."
+    )
+
+
+async def mycodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lookup-only list of the caller's unclaimed codes."""
+    user = update.effective_user
+    codes = claim_service.list_unclaimed_codes(user.id)
+    if not codes:
+        await update.message.reply_text(
+            "🎟️ My Claim Codes\n\n"
+            "You do not currently have any unclaimed codes.\n\n"
+            "If you recently won, make sure you are using the same Telegram account that entered the giveaway."
+        )
+        return
+
+    lines = [
+        "🎟️ My Unclaimed Claim Codes",
+        "",
+        f"You have {len(codes)} unclaimed code(s):",
+        "",
+    ]
+    for idx, code in enumerate(codes, start=1):
+        lines.extend([
+            f"{idx}. Claim Code:",
+            f"   {code['claim_code']}",
+            "",
+            "Prize:",
+            str(code.get('prize') or 'Unknown'),
+            "",
+            "Giveaway:",
+            str(code.get('giveaway_type') or 'Giveaway'),
+            "",
+            "Won:",
+            _format_won_at(code.get('won_at')),
+            "",
+            "Redeem with:",
+            f"/claimcode {code['claim_code']}",
+            "",
+        ])
+    await update.message.reply_text("\n".join(lines).rstrip())
+
+
+async def _send_redemption_admin_log(context: ContextTypes.DEFAULT_TYPE, user, result: dict):
+    if not ADMIN_LOG_CHANNEL_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_LOG_CHANNEL_ID,
+            text=(
+                "✅ Claim code redeemed\n\n"
+                f"Claim code: {result.get('claim_code')}\n"
+                f"Telegram ID: {user.id}\n"
+                f"Username: @{user.username if user.username else 'None'}\n"
+                f"Display name: {getattr(user, 'full_name', None)}\n"
+                f"Prize: {result.get('prize')}\n"
+                f"Accounts delivered: {result.get('accounts_delivered')}\n"
+                f"Timestamp: {datetime.utcnow().isoformat()}Z"
+            ),
+        )
+    except Exception:
+        # Redemption must not fail just because the admin-log message failed.
+        return
+
+
 async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /claimcode CPM-XXXXXX")
@@ -31,27 +131,25 @@ async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Claim codes can only be redeemed in a private DM with the bot.")
         return
     raw_code = " ".join(context.args)
-    code = normalize_claim_code(raw_code)
-    if not code:
-        await update.message.reply_text("Invalid claim code format")
-        return
     user = update.effective_user
     if is_admin(user.id):
-        status = claim_service.get_claim_status(code)
+        status = claim_service.get_claim_status(raw_code)
         if status.get("found"):
             await update.message.reply_text(
                 f"Claim: {status['code']}\nWinner: {status['winner']} ({status['winner_id']})\n"
                 f"Prize: {status['prize']}\nClaimed: {status['claimed']}\nClaimed at: {status['claimed_at']}"
             )
             return
-    result = claim_service.redeem_claim_code(code, user.id, user.username or user.full_name)
+    result = claim_service.redeem_claim_code(raw_code, user.id, user.username or user.full_name)
     if not result["success"]:
         await update.message.reply_text(result["message"])
         return
-    lines = ["✅ Prize Delivered Successfully", f"Claim Code: {code}", "Your Accounts:"]
+    delivered_code = result.get("claim_code") or raw_code
+    lines = ["✅ Prize Delivered Successfully", f"Claim Code: {delivered_code}", "Your Accounts:"]
     lines.extend(f"{idx}. {account}" for idx, account in enumerate(result["accounts"], start=1))
     lines.append("Please save these credentials immediately.")
     await update.message.reply_text("\n".join(lines))
+    await _send_redemption_admin_log(context, user, result)
 
 
 @_admin_only
@@ -99,6 +197,9 @@ async def pool_mark_invalid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def register_claim_handlers(application):
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("mycodes", mycodes))
     application.add_handler(CommandHandler("claimcode", claimcode))
     application.add_handler(CommandHandler("admin_upload_pool", admin_upload_pool))
     application.add_handler(CommandHandler("pool_add_single", pool_add_single))

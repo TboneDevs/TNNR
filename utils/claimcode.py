@@ -10,25 +10,48 @@ def _normalized_prefix() -> str:
     return str(CLAIM_CODE_PREFIX).strip().upper()
 
 
-def normalize_claim_code(code: str) -> str | None:
-    """Return the canonical PREFIX-SUFFIX form for user-entered claim codes.
+def _strip_hidden(value: str) -> str:
+    return (
+        unicodedata.normalize("NFKC", value)
+        .replace("\u200b", "")
+        .replace("\u200c", "")
+        .replace("\u200d", "")
+        .replace("\ufeff", "")
+    )
 
-    Telegram users commonly copy codes with lowercase letters, leading/trailing
-    whitespace, zero-width characters, or spaces around the hyphen.  Redemption
-    lookups must accept those harmless variations while still rejecting malformed
-    values.
+
+def claim_code_search_key(code: str) -> str:
+    """Return a punctuation-insensitive lookup key for stored/user codes."""
+    if not isinstance(code, str):
+        return ""
+    cleaned = _strip_hidden(code).strip().upper()
+    cleaned = cleaned.replace("_", "-")
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = re.sub(r"-+", "-", cleaned)
+    return cleaned.replace("-", "")
+
+
+def normalize_claim_code(code: str) -> str | None:
+    """Return the canonical PREFIX-SUFFIX form for a safely formatted code.
+
+    Accepts harmless Telegram/copy-paste variations such as lowercase text,
+    underscores, spaces around separators, missing hyphen after the prefix, and
+    hidden zero-width characters.  It does not require the DB to store exactly
+    this spelling; service lookups also compare punctuation-insensitive keys.
     """
     if not isinstance(code, str):
         return None
 
-    cleaned = unicodedata.normalize("NFKC", code)
-    cleaned = cleaned.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
-    cleaned = cleaned.strip().upper()
-    cleaned = re.sub(r"\s*-\s*", "-", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = _strip_hidden(code).strip().upper()
+    cleaned = cleaned.replace("_", "-")
+    cleaned = re.sub(r"\s+", "", cleaned)
+    cleaned = re.sub(r"-+", "-", cleaned)
 
     prefix = _normalized_prefix()
-    pattern = re.compile(rf"^{re.escape(prefix)}(?:-|\s)?([A-Z0-9]{{{CLAIM_CODE_LENGTH}}})$")
+    if cleaned.startswith(prefix) and not cleaned.startswith(prefix + "-"):
+        cleaned = prefix + "-" + cleaned[len(prefix):]
+
+    pattern = re.compile(rf"^{re.escape(prefix)}-([A-Z0-9]{{{CLAIM_CODE_LENGTH}}})$")
     match = pattern.fullmatch(cleaned)
     if not match:
         return None

@@ -332,7 +332,7 @@ def test_discussion_guess_entries_are_silent_and_store_number(tmp_path, monkeypa
     assert bot.sent == []
 
 
-def test_winner_announcement_keeps_claim_code_private(tmp_path, monkeypatch):
+def test_winner_announcement_includes_mycodes_instructions(tmp_path, monkeypatch):
     import asyncio
     import types
 
@@ -364,25 +364,31 @@ def test_winner_announcement_keeps_claim_code_private(tmp_path, monkeypatch):
     admin_log = bot.sent[2]
 
     assert public_message[0] == -1003846885691
-    assert "CPM-SECRET1" not in public_message[1]
-    assert "/claimcode" not in public_message[1]
-    assert "Winner User" in public_message[1]
+    assert "CPM-SECRET1" in public_message[1]
+    assert "@AccountTool_Bot" in public_message[1]
+    assert "/mycodes" in public_message[1]
+    assert "/claimcode CPM-SECRET1" in public_message[1]
     assert "@winneruser" in public_message[1]
     assert "42" in public_message[1]
 
     assert winner_dm[0] == 42
     assert "CPM-SECRET1" in winner_dm[1]
+    assert "@AccountTool_Bot" in winner_dm[1]
+    assert "/mycodes" in winner_dm[1]
     assert "/claimcode CPM-SECRET1" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
     assert "CPM-SECRET1" in admin_log[1]
-    assert "Winner username: @winneruser" in admin_log[1]
+    assert "Username: @winneruser" in admin_log[1]
     assert "Telegram ID: 42" in admin_log[1]
     assert "Giveaway ID: TRIVIA-PRIVATE" in admin_log[1]
+    assert "Claimed status: unclaimed" in admin_log[1]
+    assert "Public announcement sent: yes" in admin_log[1]
+    assert "Winner DM sent: yes" in admin_log[1]
     assert message.replies[-1] == "✅ Winner selected and announced."
 
 
-def test_spin_win_sends_claim_code_only_by_dm_and_admin_log(tmp_path, monkeypatch):
+def test_spin_win_includes_claim_code_and_mycodes_instructions(tmp_path, monkeypatch):
     import asyncio
     import types
 
@@ -415,18 +421,22 @@ def test_spin_win_sends_claim_code_only_by_dm_and_admin_log(tmp_path, monkeypatc
     admin_log = bot.sent[2]
 
     assert public_message[0] == -1003846885691
-    assert claim_code not in public_message[1]
-    assert "/claimcode" not in public_message[1]
+    assert claim_code in public_message[1]
+    assert "@AccountTool_Bot" in public_message[1]
+    assert "/mycodes" in public_message[1]
+    assert f"/claimcode {claim_code}" in public_message[1]
     assert "@spinwinner" in public_message[1]
     assert "43" in public_message[1]
 
     assert winner_dm[0] == 43
     assert claim_code in winner_dm[1]
+    assert "@AccountTool_Bot" in winner_dm[1]
+    assert "/mycodes" in winner_dm[1]
     assert f"/claimcode {claim_code}" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
     assert claim_code in admin_log[1]
-    assert "Winner username: @spinwinner" in admin_log[1]
+    assert "Username: @spinwinner" in admin_log[1]
 
 
 def test_claimcode_redeem_is_blocked_outside_private_dm(tmp_path, monkeypatch):
@@ -467,6 +477,9 @@ def test_claim_code_normalization_accepts_safe_variations(tmp_path, monkeypatch)
     assert normalize_claim_code("cPm - aBc123") == "CPM-ABC123"
     assert normalize_claim_code("CPM ABC123") == "CPM-ABC123"
     assert normalize_claim_code("CPMABC123") == "CPM-ABC123"
+    assert normalize_claim_code("cpmabc123") == "CPM-ABC123"
+    assert normalize_claim_code("CPM_ABC123") == "CPM-ABC123"
+    assert normalize_claim_code("CPM--ABC123") == "CPM-ABC123"
     assert validate_claim_code_format(" cpm - abc123 ") is True
     assert normalize_claim_code("CPM-ABC12") is None
     assert normalize_claim_code("BAD-ABC123") is None
@@ -518,7 +531,7 @@ def test_claim_redemption_reports_already_redeemed_after_normalized_lookup(tmp_p
     result = claim_service.redeem_claim_code("cpm-abc124", 10, "winner")
 
     assert result["success"] is False
-    assert result["message"] == "This claim code has already been redeemed"
+    assert result["message"] == "⚠️ This claim code has already been redeemed."
 
 
 def test_claimcode_handler_joins_spaced_code_args_in_private_dm(tmp_path, monkeypatch):
@@ -572,3 +585,131 @@ def test_winner_generated_claim_code_is_registered_and_redeemable_case_insensiti
     assert redeemed["success"] is True
     assert redeemed["accounts"] == ["draw@example.com:p1"]
     assert db.execute_one("SELECT status FROM claim_codes WHERE code = ?", (code,))[0] == "redeemed"
+
+
+
+def test_mycodes_no_codes_response(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import mycodes
+
+    update, message = _make_update("/mycodes", chat_type="private", user_id=200)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(mycodes(update, context))
+
+    assert "🎟️ My Claim Codes" in message.replies[-1]
+    assert "You do not currently have any unclaimed codes." in message.replies[-1]
+
+
+def test_mycodes_lists_only_requesters_unclaimed_codes(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import mycodes
+
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("LOTTERY-MY", "lottery", "5 Accounts", "winner_selected", 1))
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("TRIVIA-MY", "trivia", "1 Account", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", ("CPM-ONE111", "LOTTERY-MY", 200, "u200", "5 Accounts", 0, "2026-06-04 20:30:00"))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", ("CPM-TWO222", "TRIVIA-MY", 200, "u200", "1 Account", 0, "2026-06-04 21:10:00"))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPM-USED33", "TRIVIA-MY", 200, "u200", "1 Account", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPM-OTHER1", "TRIVIA-MY", 201, "u201", "1 Account", 0))
+    db.commit()
+
+    update, message = _make_update("/mycodes", chat_type="private", user_id=200)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(mycodes(update, context))
+
+    text = message.replies[-1]
+    assert "🎟️ My Unclaimed Claim Codes" in text
+    assert "You have 2 unclaimed code(s):" in text
+    assert "CPM-ONE111" in text
+    assert "CPM-TWO222" in text
+    assert "CPM-USED33" not in text
+    assert "CPM-OTHER1" not in text
+    assert "/claimcode CPM-ONE111" in text
+    assert "5 Accounts" in text
+    assert "Lottery" in text
+
+
+def test_claim_lookup_accepts_old_no_hyphen_stored_codes(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["old@example.com:p1"], 1, "admin")
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("OLD-CODE", "trivia", "1 Account", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize) VALUES (?, ?, ?, ?, ?)", ("CPMABC123", "OLD-CODE", 300, "olduser", "1 Account"))
+    db.commit()
+
+    result = claim_service.redeem_claim_code("cpm-abc123", 300, "olduser")
+
+    assert result["success"] is True
+    assert result["claim_code"] == "CPMABC123"
+    assert result["accounts"] == ["old@example.com:p1"]
+
+
+def test_claim_redemption_rejects_other_user_and_insufficient_inventory(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.claim_service import claim_service
+
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("OWN-CODE", "trivia", "2 Accounts", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize) VALUES (?, ?, ?, ?, ?)", ("CPM-OWN123", "OWN-CODE", 301, "owner", "2 Accounts"))
+    db.commit()
+
+    other = claim_service.redeem_claim_code("CPM-OWN123", 302, "other")
+    assert other["success"] is False
+    assert "belongs to another Telegram account" in other["message"]
+
+    insufficient = claim_service.redeem_claim_code("CPM-OWN123", 301, "owner")
+    assert insufficient["success"] is False
+    assert insufficient["message"] == "Not enough accounts available in inventory"
+
+
+def test_claimcode_handler_accepts_underscore_and_sends_admin_log(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claimcode
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["underscore@example.com:p1"], 1, "admin")
+    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("UNDER-CODE", "trivia", "1 Account", "winner_selected", 1))
+    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize) VALUES (?, ?, ?, ?, ?)", ("CPM-ABC123", "UNDER-CODE", 400, "under", "1 Account"))
+    db.commit()
+
+    update, message = _make_update("/claimcode CPM_ABC123", chat_type="private", user_id=400)
+    update.effective_user.username = "under"
+    context = types.SimpleNamespace(args=["CPM_ABC123"], bot=_FakeBot())
+
+    asyncio.run(claimcode(update, context))
+
+    assert "✅ Prize Delivered Successfully" in message.replies[-1]
+    assert "underscore@example.com:p1" in message.replies[-1]
+    assert any(sent[0] == -1005555555555 and "Claim code: CPM-ABC123" in sent[1] for sent in context.bot.sent)
+
+
+def test_start_and_help_include_mycodes_guidance(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import help_command, start
+
+    update, message = _make_update("/start", chat_type="private", user_id=500)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(start(update, context))
+    assert "/mycodes" in message.replies[-1]
+    assert "/claimcode CPM-XXXXX" in message.replies[-1]
+
+    update, message = _make_update("/help", chat_type="private", user_id=500)
+    asyncio.run(help_command(update, context))
+    assert "User Commands:" in message.replies[-1]
+    assert "/mycodes" in message.replies[-1]
+    assert "/claimcode CPM-XXXXX" in message.replies[-1]

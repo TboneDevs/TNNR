@@ -146,55 +146,98 @@ def _winner_identity_lines(result: dict) -> list[str]:
     return lines or ["Winner details unavailable"]
 
 
+BOT_USERNAME = "@AccountTool_Bot"
+
+
+def _winner_handle(result: dict) -> str:
+    username = result.get("winner_username")
+    if username:
+        return f"@{username}"
+    return result.get("display_name") or str(result.get("winner_telegram_id"))
+
+
 def _winner_public_text(result: dict) -> str:
-    """Build the public winner announcement without exposing claim codes."""
-    winner_details = "\n".join(_winner_identity_lines(result))
+    """Build the public winner announcement with /mycodes claim instructions."""
+    claim_code = result.get("claim_code")
     return (
         "🎉 Giveaway Winner!\n\n"
         "Prize:\n"
         f"🏆 {result['prize']}\n\n"
         "Winner:\n"
-        f"{winner_details}\n\n"
-        "The winner has been sent their private claim instructions by DM."
+        f"{_winner_handle(result)}\n\n"
+        "Telegram ID:\n"
+        f"{result.get('winner_telegram_id')}\n\n"
+        "Claim Code:\n"
+        f"{claim_code}\n\n"
+        "To claim your prize:\n\n"
+        "1. Start the bot:\n"
+        f"   {BOT_USERNAME}\n\n"
+        "2. Run:\n"
+        "   /mycodes\n\n"
+        "3. Copy your unclaimed claim code.\n\n"
+        "4. Redeem it with:\n"
+        f"   /claimcode {claim_code}\n\n"
+        "Only the winning Telegram account can redeem this code."
     )
 
 
-def _winner_admin_text(result: dict) -> str:
+def _winner_dm_text(result: dict) -> str:
+    claim_code = result.get("claim_code")
+    return (
+        "🎉 Congratulations!\n\n"
+        "You won:\n"
+        f"🏆 {result['prize']}\n\n"
+        "Your Claim Code:\n"
+        f"{claim_code}\n\n"
+        "To receive your accounts:\n\n"
+        "1. Start or open the bot:\n"
+        f"   {BOT_USERNAME}\n\n"
+        "2. Run:\n"
+        "   /mycodes\n\n"
+        "3. Find your unclaimed code.\n\n"
+        "4. Redeem with:\n"
+        f"   /claimcode {claim_code}\n\n"
+        "Save/Copy your code before closing this message.\n\n"
+        "Only this Telegram account can redeem the prize."
+    )
+
+
+def _winner_admin_text(result: dict, public_sent: bool = False, dm_sent: bool = False) -> str:
     return (
         "🏁 Giveaway winner selected\n\n"
-        f"Winner username: @{result.get('winner_username')}\n"
+        f"Giveaway type: {result.get('giveaway_type')}\n"
+        f"Giveaway ID: {result.get('giveaway_id')}\n"
+        f"Prize: {result.get('prize')}\n"
+        f"Claim code: {result.get('claim_code')}\n"
         f"Telegram ID: {result.get('winner_telegram_id')}\n"
+        f"Username: @{result.get('winner_username')}\n"
         f"First name: {result.get('first_name')}\n"
         f"Last name: {result.get('last_name')}\n"
         f"Display name: {result.get('display_name')}\n"
-        f"Prize: {result.get('prize')}\n"
-        f"Claim code: {result.get('claim_code')}\n"
-        f"Giveaway type: {result.get('giveaway_type')}\n"
-        f"Giveaway ID: {result.get('giveaway_id')}\n"
+        "Claimed status: unclaimed\n"
+        f"Public announcement sent: {'yes' if public_sent else 'no'}\n"
+        f"Winner DM sent: {'yes' if dm_sent else 'no'}\n"
         f"Source message ID: {result.get('source_message_id')}\n"
         f"Timestamp: {datetime.utcnow().isoformat()}Z"
     )
 
 
 async def _announce_winner(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, notify_admin_command: bool = True):
+    public_sent = False
+    dm_sent = False
     public_text = _winner_public_text(result)
-    dm_text = (
-        "🎉 Congratulations!\n\n"
-        "You won:\n"
-        f"🏆 {result['prize']}\n\n"
-        "Claim Code:\n"
-        f"{result['claim_code']}\n\n"
-        "Save/Copy this code.\n\n"
-        "Redeem using:\n\n"
-        f"/claimcode {result['claim_code']}"
-    )
-    await context.bot.send_message(chat_id=ANNOUNCEMENT_CHANNEL_ID, text=public_text)
     try:
-        await context.bot.send_message(chat_id=result["winner_telegram_id"], text=dm_text)
+        await context.bot.send_message(chat_id=ANNOUNCEMENT_CHANNEL_ID, text=public_text)
+        public_sent = True
+    except Exception as exc:
+        logger.warning("Could not post public winner announcement for %s: %s", result.get("giveaway_id"), exc)
+    try:
+        await context.bot.send_message(chat_id=result["winner_telegram_id"], text=_winner_dm_text(result))
+        dm_sent = True
     except Exception as exc:
         logger.warning("Could not DM winner %s: %s", result["winner_telegram_id"], exc)
     if ADMIN_LOG_CHANNEL_ID:
-        await context.bot.send_message(chat_id=ADMIN_LOG_CHANNEL_ID, text=_winner_admin_text(result))
+        await context.bot.send_message(chat_id=ADMIN_LOG_CHANNEL_ID, text=_winner_admin_text(result, public_sent, dm_sent))
     if notify_admin_command and getattr(update, "message", None):
         await update.message.reply_text("✅ Winner selected and announced.")
 
