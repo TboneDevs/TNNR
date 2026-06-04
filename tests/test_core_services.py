@@ -85,6 +85,7 @@ def test_application_builds_and_handlers_register(tmp_path, monkeypatch):
 
     assert app.bot.token == "123:test"
     assert app.handlers
+    assert app.post_init is main.validate_telegram_access
     registered_handler_count = sum(len(group) for group in app.handlers.values())
     assert registered_handler_count >= 10
     assert db.validate_startup()

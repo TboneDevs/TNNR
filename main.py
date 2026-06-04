@@ -5,7 +5,6 @@ Version: 2.0 Enterprise
 Target: Railway Deployment
 """ 
 
-import asyncio
 import sys
 
 from telegram.ext import Application
@@ -62,7 +61,7 @@ async def validate_telegram_access(application: Application) -> bool:
 
 def build_application() -> Application:
     """Create and configure the Telegram application."""
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(validate_telegram_access).build()
     register_admin_handlers(application)
     register_claim_handlers(application)
     register_giveaway_handlers(application)
@@ -93,9 +92,6 @@ def main():
 
         logger.info("Registering Telegram handlers...")
         app = build_application()
-
-        logger.info("Validating Telegram channel and discussion group access...")
-        asyncio.run(validate_telegram_access(app))
 
         logger.info("Bot initialization complete; starting polling")
         app.run_polling(allowed_updates=None)
