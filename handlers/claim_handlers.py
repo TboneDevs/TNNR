@@ -25,6 +25,10 @@ async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /claimcode CPM-XXXXXX")
         return
+    chat = update.effective_chat
+    if getattr(chat, "type", None) != "private":
+        await update.message.reply_text("❌ Claim codes can only be redeemed in a private DM with the bot.")
+        return
     code = context.args[0].strip()
     user = update.effective_user
     if is_admin(user.id):

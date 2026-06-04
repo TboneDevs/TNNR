@@ -63,7 +63,8 @@ class LotteryService:
 
     @staticmethod
     def spin_lottery(giveaway_id: str, telegram_id: int, username: str, display_name: str,
-                    message_id: int) -> dict:
+                    message_id: int, first_name: str = None, last_name: str = None,
+                    source_type: str = None) -> dict:
         """
         Spin lottery machine for a user.
         Returns: {'win': bool, 'prize': str, 'claim_code': str or None}
@@ -124,7 +125,16 @@ class LotteryService:
             return {
                 'win': win,
                 'prize': prize if win else None,
-                'claim_code': claim_code
+                'claim_code': claim_code,
+                'winner_telegram_id': telegram_id,
+                'winner_username': username,
+                'display_name': display_name,
+                'source_message_id': message_id,
+                'first_name': first_name,
+                'last_name': last_name,
+                'source_type': source_type,
+                'giveaway_id': giveaway_id,
+                'giveaway_type': 'spin',
             }
         except Exception as e:
             logger.error(f"Failed to spin lottery: {e}")

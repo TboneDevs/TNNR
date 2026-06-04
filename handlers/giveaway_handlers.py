@@ -127,21 +127,35 @@ def _source_type(message) -> str:
     return "discussion_group"
 
 
+def _winner_identity_lines(result: dict) -> list[str]:
+    lines = []
+    display_name = result.get("display_name")
+    username = result.get("winner_username")
+    first_name = result.get("first_name")
+    last_name = result.get("last_name")
+    telegram_id = result.get("winner_telegram_id")
+
+    if display_name:
+        lines.append(f"Name: {display_name}")
+    elif first_name or last_name:
+        lines.append(f"Name: {' '.join(part for part in [first_name, last_name] if part)}")
+    if username:
+        lines.append(f"Username: @{username}")
+    if telegram_id:
+        lines.append(f"Telegram ID: {telegram_id}")
+    return lines or ["Winner details unavailable"]
+
+
 def _winner_public_text(result: dict) -> str:
-    winner = f"@{result.get('winner_username')}" if result.get("winner_username") else result.get("display_name") or result.get("winner_telegram_id")
+    """Build the public winner announcement without exposing claim codes."""
+    winner_details = "\n".join(_winner_identity_lines(result))
     return (
         "🎉 Giveaway Winner!\n\n"
         "Prize:\n"
         f"🏆 {result['prize']}\n\n"
         "Winner:\n"
-        f"{winner}\n\n"
-        "Telegram ID:\n"
-        f"{result['winner_telegram_id']}\n\n"
-        "Claim Code:\n"
-        f"{result['claim_code']}\n\n"
-        "Save/Copy this code.\n\n"
-        "Redeem using:\n\n"
-        f"/claimcode {result['claim_code']}"
+        f"{winner_details}\n\n"
+        "The winner has been sent their private claim instructions by DM."
     )
 
 
@@ -162,7 +176,7 @@ def _winner_admin_text(result: dict) -> str:
     )
 
 
-async def _announce_winner(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict):
+async def _announce_winner(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict, notify_admin_command: bool = True):
     public_text = _winner_public_text(result)
     dm_text = (
         "🎉 Congratulations!\n\n"
@@ -181,7 +195,8 @@ async def _announce_winner(update: Update, context: ContextTypes.DEFAULT_TYPE, r
         logger.warning("Could not DM winner %s: %s", result["winner_telegram_id"], exc)
     if ADMIN_LOG_CHANNEL_ID:
         await context.bot.send_message(chat_id=ADMIN_LOG_CHANNEL_ID, text=_winner_admin_text(result))
-    await update.message.reply_text("✅ Winner selected and announced.")
+    if notify_admin_command and getattr(update, "message", None):
+        await update.message.reply_text("✅ Winner selected and announced.")
 
 
 @_admin_only
@@ -414,9 +429,12 @@ async def collect_discussion_entry(update: Update, context: ContextTypes.DEFAULT
     elif giveaway[1] == "guess":
         guess_service.submit_entry(giveaway[0], user.id, user.username, display_name, message.message_id, message.text, first_name, last_name, source_type)
     elif giveaway[1] == "lottery":
-        result = lottery_service.spin_lottery(giveaway[0], user.id, user.username, display_name, message.message_id)
+        result = lottery_service.spin_lottery(
+            giveaway[0], user.id, user.username, display_name, message.message_id,
+            first_name, last_name, source_type,
+        )
         if result.get("win"):
-            await message.reply_text(f"🎉 You won {result['prize']}! Claim Code: {result['claim_code']}")
+            await _announce_winner(update, context, result, notify_admin_command=False)
 
 
 def register_giveaway_handlers(application):

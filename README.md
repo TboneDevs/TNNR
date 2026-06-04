@@ -103,10 +103,12 @@ Malformed lines, duplicate emails, and invalid email addresses are skipped. Pass
 ## Claim process
 
 1. A giveaway service selects a winner and creates a unique claim code.
-2. The winner runs `/claimcode CPM-XXXXXX`.
-3. The bot validates ownership, stock, and previous redemption state.
-4. Accounts are reserved before delivery and marked delivered only after the redemption flow completes.
-5. Redemptions and critical actions are written to the audit log.
+2. Public winner announcements identify the winner by available name, username, and Telegram ID, but never include the claim code.
+3. The bot sends the claim code and `/claimcode CPM-XXXXXX` redemption instruction only to the winner by private DM.
+4. The winner must redeem the code in a private DM with the bot; public/group redemption attempts are blocked to keep claim codes private.
+5. The bot validates ownership, stock, and previous redemption state.
+6. Accounts are reserved before delivery and marked delivered only after the redemption flow completes.
+7. Redemptions and critical actions are written to the audit log.
 
 ## Local development
 

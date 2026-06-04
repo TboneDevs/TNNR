@@ -330,3 +330,129 @@ def test_discussion_guess_entries_are_silent_and_store_number(tmp_path, monkeypa
     assert row[3] == "discussion_group"
     assert message.replies == []
     assert bot.sent == []
+
+
+def test_winner_announcement_keeps_claim_code_private(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    load_app(tmp_path, monkeypatch)
+    from handlers.giveaway_handlers import _announce_winner
+
+    result = {
+        "winner_telegram_id": 42,
+        "winner_username": "winneruser",
+        "display_name": "Winner User",
+        "first_name": "Winner",
+        "last_name": "User",
+        "source_message_id": 1234,
+        "source_type": "discussion_group",
+        "claim_code": "CPM-SECRET1",
+        "prize": "5 Accounts",
+        "giveaway_id": "TRIVIA-PRIVATE",
+        "giveaway_type": "trivia",
+    }
+    update, message = _make_update("/trivia_draw TRIVIA-PRIVATE")
+    bot = _FakeBot()
+    context = types.SimpleNamespace(args=["TRIVIA-PRIVATE"], bot=bot)
+
+    asyncio.run(_announce_winner(update, context, result))
+
+    public_message = bot.sent[0]
+    winner_dm = bot.sent[1]
+    admin_log = bot.sent[2]
+
+    assert public_message[0] == -1003846885691
+    assert "CPM-SECRET1" not in public_message[1]
+    assert "/claimcode" not in public_message[1]
+    assert "Winner User" in public_message[1]
+    assert "@winneruser" in public_message[1]
+    assert "42" in public_message[1]
+
+    assert winner_dm[0] == 42
+    assert "CPM-SECRET1" in winner_dm[1]
+    assert "/claimcode CPM-SECRET1" in winner_dm[1]
+
+    assert admin_log[0] == -1005555555555
+    assert "CPM-SECRET1" in admin_log[1]
+    assert "Winner username: @winneruser" in admin_log[1]
+    assert "Telegram ID: 42" in admin_log[1]
+    assert "Giveaway ID: TRIVIA-PRIVATE" in admin_log[1]
+    assert message.replies[-1] == "✅ Winner selected and announced."
+
+
+def test_spin_win_sends_claim_code_only_by_dm_and_admin_log(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.giveaway_handlers import collect_discussion_entry
+    from services.lottery_service import lottery_service
+
+    gid = lottery_service.create_giveaway(
+        "5 Accounts", 1.0, 1, "admin",
+        -1003846885691, 888, "SPIN-PRIVATE", "active", -1003994249946,
+    )
+    update, message = _make_update("spin", chat_type="supergroup", chat_id=-1003994249946, user_id=43)
+    update.effective_user.username = "spinwinner"
+    update.effective_user.first_name = "Spin"
+    update.effective_user.last_name = "Winner"
+    bot = _FakeBot()
+    context = types.SimpleNamespace(args=[], bot=bot)
+
+    asyncio.run(collect_discussion_entry(update, context))
+
+    winner = db.execute_one("SELECT claim_code FROM winners WHERE giveaway_id = ?", (gid,))
+    assert winner and winner[0].startswith("CPM-")
+    claim_code = winner[0]
+    assert message.replies == []
+    assert len(bot.sent) == 3
+
+    public_message = bot.sent[0]
+    winner_dm = bot.sent[1]
+    admin_log = bot.sent[2]
+
+    assert public_message[0] == -1003846885691
+    assert claim_code not in public_message[1]
+    assert "/claimcode" not in public_message[1]
+    assert "@spinwinner" in public_message[1]
+    assert "43" in public_message[1]
+
+    assert winner_dm[0] == 43
+    assert claim_code in winner_dm[1]
+    assert f"/claimcode {claim_code}" in winner_dm[1]
+
+    assert admin_log[0] == -1005555555555
+    assert claim_code in admin_log[1]
+    assert "Winner username: @spinwinner" in admin_log[1]
+
+
+def test_claimcode_redeem_is_blocked_outside_private_dm(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claimcode
+
+    db.execute(
+        """INSERT INTO giveaways (giveaway_id, type, prize, status, created_by)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("TRIVIA-PUBLIC-BLOCK", "trivia", "1 Account", "winner_selected", 1),
+    )
+    db.execute(
+        """INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize)
+           VALUES (?, ?, ?, ?, ?)""",
+        ("CPM-PRIVATE", "TRIVIA-PUBLIC-BLOCK", 99, "winner", "1 Account"),
+    )
+    db.commit()
+
+    update, message = _make_update("/claimcode CPM-PRIVATE", chat_type="supergroup", chat_id=-1003994249946, user_id=99)
+    context = types.SimpleNamespace(args=["CPM-PRIVATE"], bot=_FakeBot())
+
+    asyncio.run(claimcode(update, context))
+
+    assert message.replies[-1] == "❌ Claim codes can only be redeemed in a private DM with the bot."
+    assert "CPM-PRIVATE" not in message.replies[-1]
+    assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-PRIVATE",))[0] == 0
