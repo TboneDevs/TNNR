@@ -71,3 +71,27 @@ def test_guess_winner_selection(tmp_path, monkeypatch):
     result = guess_service.select_winner(gid, 1, "admin")
     assert result["winner_telegram_id"] == 10
     assert result["claim_code"].startswith("CPM-")
+
+
+def test_application_builds_and_handlers_register(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    # Reload main after environment-backed modules are loaded so BOT_TOKEN/ADMIN_IDS
+    # are read from the test environment, then verify PTB v20 application build and
+    # handler registration do not touch private Updater internals or the network.
+    sys.modules.pop("main", None)
+    import main
+
+    app = main.build_application()
+
+    assert app.bot.token == "123:test"
+    assert app.handlers
+    registered_handler_count = sum(len(group) for group in app.handlers.values())
+    assert registered_handler_count >= 10
+    assert db.validate_startup()
+
+
+def test_startup_recovery_succeeds(tmp_path, monkeypatch):
+    load_app(tmp_path, monkeypatch)
+    from utils.recovery_manager import recovery_manager
+
+    assert recovery_manager.startup_recovery() is True

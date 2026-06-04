@@ -12,6 +12,16 @@ TNNR is a Railway-ready Telegram giveaway automation system with SQLite persiste
 - Audit logs, pool status, dashboard, health, and diagnostics commands.
 - Startup recovery for stale reserved inventory.
 
+## Runtime compatibility
+
+This bot is pinned for production on **Python 3.11.9** with `python-telegram-bot==20.7`. Railway must not build it on Python 3.13, because the pinned Telegram library is only classified for Python 3.8 through 3.12 and can crash during `Application.builder().build()` while constructing PTB internals.
+
+The repository includes three safeguards:
+
+- `runtime.txt` pins `python-3.11.9` for Python buildpack/Nixpacks detection.
+- `nixpacks.toml` keeps the Nixpacks install/start flow on Python 3.11.
+- `Dockerfile` uses `python:3.11.9-slim` as the authoritative Railway build path when Dockerfile deployment is enabled.
+
 ## Railway setup
 
 1. Create a Railway project and deploy this repository.

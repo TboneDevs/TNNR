@@ -1,0 +1,18 @@
+# Railway/Nixpacks fallback configuration.
+# runtime.txt pins the exact Python version; this file keeps Railway on Python 3.11
+# and defines the same install/start flow if Nixpacks is used instead of Dockerfile.
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = [
+  "python -m pip install --upgrade pip",
+  "python -m pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python main.py"
+
+[variables]
+PYTHONUNBUFFERED = "1"
+PYTHONDONTWRITEBYTECODE = "1"
