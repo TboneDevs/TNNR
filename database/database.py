@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class Database:
@@ -129,6 +129,15 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 006")
+            applied.add(6)
+        if 7 not in applied:
+            self._migration_007(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (7, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 007")
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -466,6 +475,43 @@ class Database:
             )
 
 
+    def _migration_007(self, conn: sqlite3.Connection):
+        """Add persistent free-credit event tables."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS credit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_by_admin_id INTEGER NOT NULL,
+                admin_name TEXT,
+                announcement_channel_id INTEGER,
+                announcement_message_id INTEGER,
+                credit_amount INTEGER NOT NULL DEFAULT 3,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS credit_event_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                credits_awarded INTEGER NOT NULL DEFAULT 3,
+                new_balance INTEGER NOT NULL DEFAULT 0,
+                claimed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(event_id, telegram_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_credit_events_status
+                ON credit_events(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_credit_event_claims_user
+                ON credit_event_claims(telegram_id, claimed_at);
+            CREATE INDEX IF NOT EXISTS idx_credit_event_claims_event
+                ON credit_event_claims(event_id);
+            """
+        )
+
+
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
         try:
@@ -478,7 +524,7 @@ class Database:
                 "users", "admins", "giveaways", "entries", "winners", "claim_codes",
                 "account_pool", "redemptions", "audit_logs", "system_logs", "schema_migrations",
                 "account_entitlements", "account_delivery_logs", "bonus_claims",
-                "credit_profiles", "credit_game_logs",
+                "credit_profiles", "credit_game_logs", "credit_events", "credit_event_claims",
             }
             existing = {row[0] for row in self.execute_all("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = required_tables - existing

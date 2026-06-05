@@ -464,7 +464,7 @@ def test_claimcode_redeem_is_blocked_outside_private_dm(tmp_path, monkeypatch):
 
     asyncio.run(claimcode(update, context))
 
-    assert message.replies[-1] == "❌ Account delivery can only be handled in a private DM with the bot."
+    assert message.replies[-1] == "For privacy, account details can only be viewed in DMs. Please message the bot directly."
     assert "CPM-PRIVATE" not in message.replies[-1]
     assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-PRIVATE",))[0] == 0
 
@@ -1019,7 +1019,7 @@ def test_claim_withdraw_partial_and_dm_failure_safety(tmp_path, monkeypatch):
     update2, message2 = _make_update("/claim", chat_type="supergroup", chat_id=-99, user_id=1401)
     context2 = types.SimpleNamespace(args=[], bot=_SelectiveFailBot(fail_chat_id=1401))
     asyncio.run(claim(update2, context2))
-    assert message2.replies[-1] == "Please open the bot in private messages first, then rerun /claim."
+    assert message2.replies[-1] == "Please start the bot in DMs first, then run the command again."
     assert direct_delivery_service.get_pending_amount(1401) == 1
     assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
 
@@ -1057,3 +1057,107 @@ def test_leaderboard_and_giveaway_credit_allocation_no_account_exposure(tmp_path
     assert "@" in message.replies[-1]
     assert "email" not in message.replies[-1].lower()
     assert "password" not in message.replies[-1].lower()
+
+
+
+def test_public_claim_invocation_never_replies_with_credentials_and_dm_failure_is_safe(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claim
+    from services.direct_delivery_service import direct_delivery_service
+    from services.pool_service import pool_service
+    from utils.privacy import START_DM_FIRST_MESSAGE
+
+    pool_service.import_accounts(["publicsafe@example.com:p1"], 1, "admin")
+    direct_delivery_service.allocate_owed_accounts(1600, 1, "test", prize="1 Account")
+    update, message = _make_update("/claim", chat_type="supergroup", chat_id=-1003994249946, user_id=1600)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot(fail=RuntimeError("bot cannot dm user")))
+
+    asyncio.run(claim(update, context))
+
+    assert message.replies[-1] == START_DM_FIRST_MESSAGE
+    assert "publicsafe@example.com" not in message.replies[-1]
+    assert direct_delivery_service.get_pending_amount(1600) == 1
+    assert db.execute_one("SELECT status FROM account_pool WHERE email = ?", ("publicsafe@example.com",))[0] == "available"
+
+
+def test_public_claim_success_only_confirms_dm_without_credentials(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claim
+    from services.direct_delivery_service import direct_delivery_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["privatedm@example.com:p1"], 1, "admin")
+    direct_delivery_service.allocate_owed_accounts(1601, 1, "test", prize="1 Account")
+    update, message = _make_update("/claim", chat_type="supergroup", chat_id=-1003994249946, user_id=1601)
+    bot = _FakeBot()
+    context = types.SimpleNamespace(args=[], bot=bot)
+
+    asyncio.run(claim(update, context))
+
+    assert message.replies[-1] == "✅ 1 account(s) sent to your DM."
+    assert "privatedm@example.com" not in message.replies[-1]
+    assert any(sent[0] == 1601 and "privatedm@example.com:p1" in sent[1] for sent in bot.sent)
+    assert direct_delivery_service.get_pending_amount(1601) == 0
+
+
+def test_credit_event_admin_and_user_claim_flow(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.admin_handlers import creditevent
+    from handlers.claim_handlers import eventclaim
+    from services.direct_delivery_service import direct_delivery_service
+
+    admin_update, admin_message = _make_update("/creditevent", chat_type="private", user_id=1)
+    bot = _FakeBot()
+    context = types.SimpleNamespace(args=[], bot=bot)
+    asyncio.run(creditevent(admin_update, context))
+
+    assert admin_message.replies[-1] == "Credit event posted successfully. Users can now claim 3 credits with /eventclaim."
+    assert db.execute_one("SELECT COUNT(*) FROM credit_events WHERE status = 'active'")[0] == 1
+    assert any(sent[0] == -1003846885691 and "/eventclaim" in sent[1] for sent in bot.sent)
+
+    user_update, user_message = _make_update("/eventclaim", chat_type="private", user_id=1700)
+    user_update.effective_user.username = "eventuser"
+    asyncio.run(eventclaim(user_update, context))
+    assert user_message.replies[-1] == "Success! You received 3 event credits."
+    assert direct_delivery_service.get_pending_amount(1700) == 3
+
+    dup_update, dup_message = _make_update("/eventclaim", chat_type="private", user_id=1700)
+    asyncio.run(eventclaim(dup_update, context))
+    assert dup_message.replies[-1] == "You have already claimed this event credit top-up."
+    assert direct_delivery_service.get_pending_amount(1700) == 3
+
+    admin_update2, admin_message2 = _make_update("/creditevent", chat_type="private", user_id=1)
+    asyncio.run(creditevent(admin_update2, context))
+    user_update2, user_message2 = _make_update("/eventclaim", chat_type="private", user_id=1700)
+    asyncio.run(eventclaim(user_update2, context))
+    assert user_message2.replies[-1] == "Success! You received 3 event credits."
+    assert direct_delivery_service.get_pending_amount(1700) == 6
+
+
+def test_eventclaim_group_does_not_grant_credits(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import eventclaim
+    from services.credit_event_service import credit_event_service
+    from services.direct_delivery_service import direct_delivery_service
+
+    credit_event_service.create_event(1, "admin", -1003846885691, 999)
+    update, message = _make_update("/eventclaim", chat_type="supergroup", chat_id=-1003994249946, user_id=1800)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(eventclaim(update, context))
+
+    assert "DMs" in message.replies[-1]
+    assert direct_delivery_service.get_pending_amount(1800) == 0
+    assert db.execute_one("SELECT COUNT(*) FROM credit_event_claims WHERE telegram_id = ?", (1800,))[0] == 0

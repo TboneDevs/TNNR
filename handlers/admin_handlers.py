@@ -3,11 +3,12 @@
 from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes
 
-from config import ADMIN_IDS, ANNOUNCEMENT_CHANNEL_ID, DATABASE_PATH, DISCUSSION_GROUP_ID, RAILWAY_VOLUME_MOUNT_PATH
+from config import ADMIN_IDS, ADMIN_LOG_CHANNEL_ID, ANNOUNCEMENT_CHANNEL_ID, DATABASE_PATH, DISCUSSION_GROUP_ID, RAILWAY_VOLUME_MOUNT_PATH
 from database.database import db
 from services.pool_service import pool_service
 from services.direct_delivery_service import direct_delivery_service
-from utils.channel_utils import ANNOUNCEMENT_CHANNEL_USERNAME, classify_group_error, classify_telegram_error, start_discussion_read_test, verify_discussion_group
+from services.credit_event_service import credit_event_service
+from utils.channel_utils import ANNOUNCEMENT_CHANNEL_USERNAME, classify_group_error, classify_telegram_error, post_announcement, start_discussion_read_test, verify_discussion_group
 from utils.permissions import is_admin
 from utils.recovery_manager import recovery_manager
 
@@ -156,6 +157,56 @@ async def discussiontest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+@_admin_only
+async def creditevent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Create and announce a one-time free credit top-up event."""
+    admin = update.effective_user
+    announcement_text = (
+        "🎟️ Free Credit Event!\n\n"
+        "Users can receive a one-time event top-up of 3 free credits.\n\n"
+        "To claim:\n"
+        "1. DM the bot.\n"
+        "2. Run /eventclaim.\n\n"
+        "Credits are free bonus credits only and can be used for /slots, /coinflip, or claimed with /claim."
+    )
+    post = await post_announcement(context.bot, announcement_text)
+    if not post.ok:
+        await update.message.reply_text(
+            "❌ Credit event announcement failed.\n\n"
+            f"Reason: {post.reason or 'TELEGRAM_API_ERROR'}\n"
+            f"Details: {post.details or 'Unknown error'}"
+        )
+        return
+    result = credit_event_service.create_event(
+        admin.id,
+        admin.username or getattr(admin, "full_name", None),
+        ANNOUNCEMENT_CHANNEL_ID,
+        post.message_id,
+    )
+    if not result.get("success"):
+        await update.message.reply_text(f"❌ Credit event could not be created: {result.get('message')}")
+        return
+    if ADMIN_LOG_CHANNEL_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_LOG_CHANNEL_ID,
+                text=(
+                    "🎟️ Credit event posted\n\n"
+                    f"Admin ID: {admin.id}\n"
+                    f"Admin username: @{admin.username if admin.username else 'None'}\n"
+                    f"Event ID: {result.get('event_id')}\n"
+                    f"Credits per user: {result.get('credit_amount')}\n"
+                    f"Announcement channel: {ANNOUNCEMENT_CHANNEL_ID}\n"
+                    f"Announcement message ID: {post.message_id}"
+                ),
+            )
+        except Exception:
+            pass
+    await update.message.reply_text(
+        "Credit event posted successfully. Users can now claim 3 credits with /eventclaim."
+    )
+
+
 async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = db.diagnostics()
     await update.message.reply_text(
@@ -221,3 +272,4 @@ def register_admin_handlers(application):
     application.add_handler(CommandHandler("channeltest", channeltest))
     application.add_handler(CommandHandler("discussiontest", discussiontest))
     application.add_handler(CommandHandler("give", give))
+    application.add_handler(CommandHandler("creditevent", creditevent))

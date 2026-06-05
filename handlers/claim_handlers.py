@@ -7,6 +7,7 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import ADMIN_LOG_CHANNEL_ID
 from services.bonus_service import bonus_service
+from services.credit_event_service import credit_event_service
 from services.claim_service import claim_service
 from services.direct_delivery_service import (
     CLAIM_DM_FAILURE_MESSAGE,
@@ -17,6 +18,7 @@ from services.direct_delivery_service import (
 )
 from services.pool_service import pool_service
 from utils.permissions import is_admin
+from utils.privacy import PUBLIC_ACCOUNT_PRIVACY_MESSAGE, START_DM_FIRST_MESSAGE, is_private_chat
 
 AWAITING_POOL_UPLOAD = set()
 BOT_USERNAME = "@AccountTool_Bot"
@@ -100,6 +102,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Same as /claim.\n\n"
         "/bonus\n"
         "Receive 1 free unclaimed account credit every 5 days.\n\n"
+        "/eventclaim\n"
+        "Claim the current admin-posted event top-up of 3 free credits. Use in DM only.\n\n"
         "/slots\n"
         "Use exactly 1 free unclaimed credit for one slots spin.\n\n"
         "/coinflip heads\n"
@@ -202,6 +206,7 @@ async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _claim_or_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
     user = update.effective_user
+    invoked_private = is_private_chat(update)
     prepared = direct_delivery_service.prepare_claim_for_user(user.id, _username(user), trigger=command)
     if prepared.get("status") == "no_pending":
         await update.message.reply_text(NO_UNCLAIMED_MESSAGE)
@@ -229,7 +234,7 @@ async def _claim_or_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE,
         direct_delivery_service.fail_prepared_claim(
             user.id, prepared["delivery_log_id"], prepared["account_ids"], "DM_FAILED", _username(user), command
         )
-        await update.message.reply_text(CLAIM_DM_FAILURE_MESSAGE)
+        await update.message.reply_text(CLAIM_DM_FAILURE_MESSAGE if invoked_private else START_DM_FIRST_MESSAGE)
         failed = dict(prepared)
         failed["status"] = "dm_failed"
         await _send_claim_log(context, user, command, failed, "failed")
@@ -243,7 +248,7 @@ async def _claim_or_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.message.reply_text("❌ Claim could not be finalized. Please contact an admin.")
         return
     await _send_claim_log(context, user, command, completed, "success")
-    if getattr(update.effective_chat, "type", None) != "private":
+    if not invoked_private:
         await update.message.reply_text(f"✅ {prepared.get('reserved_amount')} account(s) sent to your DM.")
     else:
         extra = ""
@@ -310,6 +315,38 @@ async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def eventclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Claim the active admin credit event once per event."""
+    if not update.message or not update.effective_user:
+        return
+    if not is_private_chat(update):
+        await update.message.reply_text(
+            "For privacy, event credits can only be claimed in DMs. Please message the bot directly."
+        )
+        return
+    user = update.effective_user
+    result = credit_event_service.claim_current_event(user.id, _username(user), getattr(user, "full_name", None))
+    if result.get("status") == "already_claimed":
+        await update.message.reply_text("You have already claimed this event credit top-up.")
+        return
+    if not result.get("success"):
+        await update.message.reply_text(result.get("message", "No credit event is active right now."))
+        return
+    await _send_admin_log(
+        context,
+        (
+            "🎟️ Credit event claimed\n\n"
+            f"User Telegram ID: {user.id}\n"
+            f"Username: @{user.username if user.username else 'None'}\n"
+            f"Event ID: {result.get('event_id')}\n"
+            f"Credits added: {result.get('amount')}\n"
+            f"New balance: {result.get('balance')}\n"
+            f"Time: {datetime.utcnow().isoformat()}Z"
+        ),
+    )
+    await update.message.reply_text("Success! You received 3 event credits.")
+
+
 async def mycodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Backward-compatible guidance for the new free-credit system."""
     user = update.effective_user
@@ -371,8 +408,8 @@ def _extract_claim_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Legacy compatibility command. New users should use /claim."""
     chat = update.effective_chat
-    if getattr(chat, "type", None) != "private":
-        await update.message.reply_text("❌ Account delivery can only be handled in a private DM with the bot.")
+    if not is_private_chat(update):
+        await update.message.reply_text(PUBLIC_ACCOUNT_PRIVACY_MESSAGE)
         return
     raw_code = _extract_claim_code_input(update, context)
     user = update.effective_user
@@ -441,10 +478,11 @@ def register_claim_handlers(application):
     application.add_handler(CommandHandler("bet", bet))
     application.add_handler(CommandHandler("slots", slots))
     application.add_handler(CommandHandler("coinflip", coinflip))
-    application.add_handler(CommandHandler("claim", claim))
+    application.add_handler(CommandHandler(["claim", "claims"], claim))
     application.add_handler(CommandHandler("withdraw", withdraw))
     application.add_handler(CommandHandler("leaderboard", leaderboard))
     application.add_handler(CommandHandler("bonus", bonus))
+    application.add_handler(CommandHandler("eventclaim", eventclaim))
     application.add_handler(CommandHandler("mycodes", mycodes))
     application.add_handler(CommandHandler("claimcode", claimcode))
     application.add_handler(CommandHandler("admin_upload_pool", admin_upload_pool))

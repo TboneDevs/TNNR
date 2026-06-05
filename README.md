@@ -194,3 +194,23 @@ This is a free bonus credit system only. Users must never deposit money, pay to 
 - `/slots` costs exactly 1 unclaimed credit per spin and uses this 100% probability table: 66% lose, 18.9% win 1, 7% win 2, 5% win 3, 2% win 6, 1% win 20, 0.1% win 80. Expected RTP: 87.9%.
 - `/coinflip heads|tails` costs exactly 1 unclaimed credit; users have a 40% win chance and 60% loss chance.
 - `/balance`, `/bet`, and `/leaderboard` show/manage free credits without exposing account credentials.
+
+
+## Account privacy
+
+Account credentials and delivery details are never shown in public chats, groups, linked discussion groups, or announcement channels. Commands that deliver accounts, including `/claim`, `/claims`, `/withdraw`, and legacy claim-code flows, send credentials only by direct/private message with the bot. If a public command needs a DM and the bot cannot message the user yet, the public chat receives: `Please start the bot in DMs first, then run the command again.`
+
+Credit counts such as `/balance` and `/leaderboard` are safe summaries and do not expose emails, passwords, account codes, or delivered account details.
+
+
+## Credit events
+
+Admins can run `/creditevent` to create a new free credit event and post an announcement to the configured announcement channel. Users then DM the bot and run `/eventclaim` to receive a one-time top-up of 3 free credits for the current event. Each new `/creditevent` creates a new event, so users can claim once per event. Event claims are stored persistently and add credits to the same free-credit balance used by `/balance`, `/slots`, `/coinflip`, `/claim`, and `/withdraw`.
+
+User command:
+
+- `/eventclaim` — claim the current event's 3 free credits in a private DM only.
+
+Admin command:
+
+- `/creditevent` — post a new credit event announcement and enable one claim per user for that event.
