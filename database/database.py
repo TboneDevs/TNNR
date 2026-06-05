@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Database:
@@ -111,6 +111,15 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 004")
+            applied.add(4)
+        if 5 not in applied:
+            self._migration_005(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (5, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 005")
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -363,6 +372,32 @@ class Database:
             )
 
 
+    def _migration_005(self, conn: sqlite3.Connection):
+        """Add persistent bonus claim cooldown and delivery tracking."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS bonus_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                account_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'in_progress',
+                claimed_at TEXT,
+                failed_at TEXT,
+                failure_reason TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bonus_claims_user_status
+                ON bonus_claims(telegram_id, status);
+            CREATE INDEX IF NOT EXISTS idx_bonus_claims_claimed_at
+                ON bonus_claims(claimed_at);
+            CREATE INDEX IF NOT EXISTS idx_bonus_claims_account
+                ON bonus_claims(account_id);
+            """
+        )
+
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
         try:
@@ -374,7 +409,7 @@ class Database:
             required_tables = {
                 "users", "admins", "giveaways", "entries", "winners", "claim_codes",
                 "account_pool", "redemptions", "audit_logs", "system_logs", "schema_migrations",
-                "account_entitlements", "account_delivery_logs",
+                "account_entitlements", "account_delivery_logs", "bonus_claims",
             }
             existing = {row[0] for row in self.execute_all("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = required_tables - existing

@@ -169,3 +169,14 @@ Example:
 ### Legacy commands
 
 `/claimcode` and `/mycodes` are retained for backward compatibility/helpful guidance, but users do not need a claim code to receive accounts. `/mycodes` now reports pending direct-delivery balances instead of exposing claim codes or account credentials.
+
+
+### Bonus accounts
+
+All users can run:
+
+```text
+/bonus
+```
+
+The bot will DM exactly one available bonus account if stock is available and the user is not on the 120-hour (5-day) cooldown. If the bot cannot DM the user, no account is removed from stock and the user should start the bot in DMs before rerunning `/bonus`. Successful bonus claims are logged to the admin log channel with the user ID, username, claim time, account sent, and remaining pool count.

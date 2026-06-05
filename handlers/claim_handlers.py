@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import ADMIN_LOG_CHANNEL_ID
+from services.bonus_service import bonus_service
 from services.claim_service import claim_service
 from services.direct_delivery_service import direct_delivery_service
 from services.pool_service import pool_service
@@ -118,6 +119,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "User Commands:\n\n"
         "/start\n"
         "Check for and automatically receive any pending accounts.\n\n"
+        "/bonus\n"
+        "Claim one free bonus account every 5 days when stock is available.\n\n"
         "/mycodes\n"
         "Legacy command: claim codes are no longer required; this checks your pending direct-delivery balance.\n\n"
         "/claimcode CPM-XXXXX\n"
@@ -126,6 +129,77 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/give TELEGRAM_ID AMOUNT\n"
         "Assign direct owed accounts to a Telegram user."
     )
+
+
+
+async def _send_bonus_admin_log(context: ContextTypes.DEFAULT_TYPE, user, account: str, remaining: int, claimed_at: str):
+    if not ADMIN_LOG_CHANNEL_ID:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_LOG_CHANNEL_ID,
+            text=(
+                "🎁 Bonus account claimed\n\n"
+                f"User Telegram ID: {user.id}\n"
+                f"Username: @{user.username if user.username else 'None'}\n"
+                f"Time claimed: {claimed_at}Z\n"
+                f"Account sent: {account}\n"
+                f"Remaining accounts in pool: {remaining}"
+            ),
+        )
+    except Exception:
+        return
+
+
+async def bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Public /bonus command: DM exactly one account with a 120-hour cooldown."""
+    user = update.effective_user
+    if not user or not update.message:
+        return
+    username = user.username or getattr(user, "full_name", None)
+    reservation = bonus_service.begin_claim(user.id, username)
+
+    if reservation.get("status") == "cooldown":
+        await update.message.reply_text(
+            f"⏳ You already claimed a bonus account. You can use /bonus again in {reservation.get('remaining_text')}."
+        )
+        return
+    if reservation.get("status") == "in_progress":
+        await update.message.reply_text(reservation.get("message", "Your bonus claim is already being processed. Please wait a moment."))
+        return
+    if reservation.get("status") == "no_stock":
+        await update.message.reply_text("No bonus accounts are available right now. Please try again later.")
+        return
+    if reservation.get("status") != "reserved":
+        await update.message.reply_text("❌ Bonus claim could not be completed right now. Please try again later.")
+        return
+
+    account = reservation["account"]
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "🎁 Bonus Account\n\n"
+                "Here is your bonus account:\n"
+                f"{account}\n\n"
+                "You can claim another bonus in 5 days. Please save these credentials immediately."
+            ),
+        )
+    except Exception:
+        bonus_service.fail_claim(reservation["claim_id"], user.id, reservation["account_id"], "DM_FAILED")
+        await update.message.reply_text("Please start the bot in DMs first, then rerun /bonus.")
+        return
+
+    completed = bonus_service.complete_claim(
+        reservation["claim_id"], user.id, reservation["account_id"], account, username
+    )
+    if completed.get("status") != "delivered":
+        await update.message.reply_text("❌ Bonus claim could not be finalized. Please contact an admin.")
+        return
+
+    await _send_bonus_admin_log(context, user, account, completed.get("remaining", 0), completed.get("claimed_at"))
+    if getattr(update.effective_chat, "type", None) != "private":
+        await update.message.reply_text("✅ Bonus account sent to your DM.")
 
 
 async def mycodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,6 +343,7 @@ async def pool_mark_invalid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def register_claim_handlers(application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("bonus", bonus))
     application.add_handler(CommandHandler("mycodes", mycodes))
     application.add_handler(CommandHandler("claimcode", claimcode))
     application.add_handler(CommandHandler("admin_upload_pool", admin_upload_pool))

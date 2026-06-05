@@ -788,3 +788,154 @@ def test_mycodes_legacy_command_does_not_show_claim_codes(tmp_path, monkeypatch)
 
     assert "1 pending account" in message.replies[-1]
     assert "/claimcode" not in message.replies[-1]
+
+
+def test_bonus_success_sends_one_account_sets_cooldown_and_logs(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import bonus
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["bonus1@example.com:p1", "bonus2@example.com:p2"], 1, "admin")
+    update, message = _make_update("/bonus", chat_type="supergroup", chat_id=-444, user_id=1001)
+    update.effective_user.username = "bonususer"
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(bonus(update, context))
+
+    assert (1001, "🎁 Bonus Account\n\nHere is your bonus account:\nbonus1@example.com:p1\n\nYou can claim another bonus in 5 days. Please save these credentials immediately.") in context.bot.sent
+    assert message.replies[-1] == "✅ Bonus account sent to your DM."
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1001,))[0] == 1
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1001,))[0] == 1
+    assert any(sent[0] == -1005555555555 and "Bonus account claimed" in sent[1] and "bonus1@example.com:p1" in sent[1] and "Remaining accounts in pool: 1" in sent[1] for sent in context.bot.sent)
+
+
+def test_bonus_cooldown_blocks_repeat_and_persists(tmp_path, monkeypatch):
+    import asyncio
+    import types
+    import importlib
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import bonus
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["cool1@example.com:p1", "cool2@example.com:p2"], 1, "admin")
+    update, message = _make_update("/bonus", chat_type="private", user_id=1002)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(bonus(update, context))
+
+    # Simulate a restart/re-open by closing and re-opening the shared DB.
+    db.close()
+    db.connect()
+    update2, message2 = _make_update("/bonus", chat_type="private", user_id=1002)
+    context2 = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(bonus(update2, context2))
+
+    assert "You already claimed a bonus account" in message2.replies[-1]
+    assert "day" in message2.replies[-1] or "hour" in message2.replies[-1]
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1002,))[0] == 1
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1002,))[0] == 1
+
+
+class _SelectiveFailBot(_FakeBot):
+    def __init__(self, fail_chat_id=None):
+        super().__init__()
+        self.fail_chat_id = fail_chat_id
+
+    async def send_message(self, chat_id, text):
+        if chat_id == self.fail_chat_id:
+            raise RuntimeError("Forbidden: bot was blocked by the user")
+        return await super().send_message(chat_id, text)
+
+
+def test_bonus_dm_failure_does_not_remove_stock_or_start_cooldown(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import bonus
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["dmfail@example.com:p1"], 1, "admin")
+    update, message = _make_update("/bonus", chat_type="supergroup", chat_id=-444, user_id=1003)
+    context = types.SimpleNamespace(args=[], bot=_SelectiveFailBot(fail_chat_id=1003))
+
+    asyncio.run(bonus(update, context))
+
+    assert message.replies[-1] == "Please start the bot in DMs first, then rerun /bonus."
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1003,))[0] == 0
+
+    # After starting DMs, the same user can rerun successfully.
+    context2 = types.SimpleNamespace(args=[], bot=_FakeBot())
+    update2, message2 = _make_update("/bonus", chat_type="private", user_id=1003)
+    asyncio.run(bonus(update2, context2))
+    assert any(sent[0] == 1003 and "dmfail@example.com:p1" in sent[1] for sent in context2.bot.sent)
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1003,))[0] == 1
+
+
+def test_bonus_no_stock_does_not_update_cooldown(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import bonus
+
+    update, message = _make_update("/bonus", chat_type="private", user_id=1004)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    asyncio.run(bonus(update, context))
+
+    assert message.replies[-1] == "No bonus accounts are available right now. Please try again later."
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ?", (1004,))[0] == 0
+
+
+def test_bonus_duplicate_in_progress_does_not_double_deliver(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import bonus
+    from services.bonus_service import bonus_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["dup1@example.com:p1", "dup2@example.com:p2"], 1, "admin")
+    first = bonus_service.begin_claim(1005, "dupe")
+    assert first["status"] == "reserved"
+
+    update, message = _make_update("/bonus", chat_type="private", user_id=1005)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(bonus(update, context))
+
+    assert "already being processed" in message.replies[-1]
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1005,))[0] == 0
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'reserved' AND assigned_user = ?", (1005,))[0] == 1
+    bonus_service.fail_claim(first["claim_id"], 1005, first["account_id"], "TEST_CLEANUP")
+
+
+def test_bonus_handler_registered_and_help_mentions_bonus(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import help_command
+    import main
+
+    app = main.build_application()
+    command_names = set()
+    for group in app.handlers.values():
+        for handler in group:
+            commands = getattr(handler, "commands", None)
+            if commands:
+                command_names.update(commands)
+    assert "bonus" in command_names
+
+    update, message = _make_update("/help", chat_type="private", user_id=1006)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(help_command(update, context))
+    assert "/bonus" in message.replies[-1]
+    assert "5 days" in message.replies[-1]
