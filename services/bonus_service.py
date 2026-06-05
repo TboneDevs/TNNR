@@ -256,4 +256,77 @@ class BonusService:
             return {"status": "error", "message": str(exc)}
 
 
+    @staticmethod
+    def claim_credit(telegram_id: int, username: str | None = None) -> dict:
+        """Award one free unclaimed credit after enforcing the 120-hour cooldown."""
+        conn = db.connect()
+        now_dt = BonusService._now()
+        now = now_dt.isoformat()
+        try:
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            last_row = conn.execute(
+                """SELECT claimed_at FROM bonus_claims
+                   WHERE telegram_id = ? AND status = 'delivered'
+                   ORDER BY claimed_at DESC, id DESC LIMIT 1""",
+                (telegram_id,),
+            ).fetchone()
+            last_claim = BonusService._parse_dt(last_row[0]) if last_row else None
+            if last_claim and now_dt < last_claim + BONUS_COOLDOWN:
+                remaining = (last_claim + BONUS_COOLDOWN) - now_dt
+                conn.commit()
+                return {"status": "cooldown", "remaining_text": BonusService._format_remaining(remaining)}
+            active = conn.execute(
+                "SELECT id FROM bonus_claims WHERE telegram_id = ? AND status = 'in_progress' LIMIT 1",
+                (telegram_id,),
+            ).fetchone()
+            if active:
+                conn.commit()
+                return {"status": "in_progress", "message": "Your bonus claim is already being processed. Please wait a moment."}
+            conn.execute(
+                """INSERT INTO bonus_claims
+                   (telegram_id, username, account_id, status, claimed_at, created_at, updated_at)
+                   VALUES (?, ?, NULL, 'delivered', ?, ?, ?)""",
+                (telegram_id, username, now, now, now),
+            )
+            conn.execute(
+                """INSERT INTO credit_profiles (telegram_id, username, total_won, created_at, updated_at)
+                   VALUES (?, ?, 1, ?, ?)
+                   ON CONFLICT(telegram_id) DO UPDATE SET
+                       username = COALESCE(excluded.username, credit_profiles.username),
+                       total_won = total_won + 1,
+                       updated_at = excluded.updated_at""",
+                (telegram_id, username, now, now),
+            )
+            conn.execute(
+                """INSERT INTO account_entitlements
+                   (telegram_id, owed_amount, delivered_amount, status, source_type, prize, created_at, updated_at)
+                   VALUES (?, 1, 0, 'pending', 'bonus', '1 Bonus Account Credit', ?, ?)""",
+                (telegram_id, now, now),
+            )
+            balance = conn.execute(
+                """SELECT COALESCE(SUM(owed_amount - delivered_amount), 0)
+                   FROM account_entitlements
+                   WHERE telegram_id = ? AND status IN ('pending', 'partial') AND owed_amount > delivered_amount""",
+                (telegram_id,),
+            ).fetchone()[0]
+            conn.commit()
+            audit_log.log(
+                action="BONUS_CREDIT_AWARDED",
+                actor_id=telegram_id,
+                actor_name=username,
+                details=f"Awarded 1 free bonus credit. New balance: {int(balance or 0)}",
+                result="SUCCESS",
+            )
+            return {"status": "awarded", "amount": 1, "balance": int(balance or 0), "claimed_at": now}
+        except Exception as exc:
+            logger.error("Bonus claim_credit failed for %s: %s", telegram_id, exc)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {"status": "error", "message": str(exc)}
+
+
 bonus_service = BonusService()

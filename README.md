@@ -7,7 +7,7 @@ TNNR is a Railway-ready Telegram giveaway automation system with SQLite persiste
 - Multi-admin support through `ADMIN_IDS`.
 - Trivia and number-guess giveaway services with duplicate-entry prevention.
 - Secure winner and claim-code generation using Python's `secrets` module.
-- Account pool upload/import and automatic claim redemption delivery.
+- Account pool upload/import and free-credit balances, explicit account claiming, and account-pool delivery.
 - SQLite schema migrations with persistent Railway volume paths.
 - Audit logs, pool status, dashboard, health, and diagnostics commands.
 - Startup recovery for stale reserved inventory.
@@ -77,7 +77,7 @@ See `.env.example` for a copy/paste template.
 - `/pool_mark_invalid email@example.com` — mark an account invalid.
 - `/give TELEGRAM_ID AMOUNT` — admin-only direct allocation of owed accounts to a Telegram user.
 - `/mycodes` — legacy user command that now reports pending direct-delivery balance; claim codes are no longer required.
-- `/claimcode CPM-XXXXXX` — legacy compatibility command; users should normally open DM or run `/start` for automatic delivery.
+- `/claimcode CPM-XXXXXX` — legacy compatibility only; new users should use `/claim` or `/withdraw`.
 
 ## Giveaway announcement channel flow
 
@@ -142,15 +142,15 @@ Admin tests:
 
 ## Direct Account Delivery
 
-Claim codes are no longer required for account delivery. The bot now tracks pending owed accounts by Telegram user ID and delivers accounts automatically when the winning user opens a private DM with the bot or runs `/start`.
+Claim codes are no longer required for new account delivery. The bot tracks free unclaimed account credits by Telegram user ID. Users must explicitly run `/claim` or `/withdraw` in DM to convert credits into account credentials.
 
 ### User flow
 
 1. A winner is selected or an admin assigns accounts with `/give`.
 2. The bot records a pending owed-account balance for that Telegram user ID.
-3. The user opens the bot DM or runs `/start`.
-4. If enough stock is available, the bot sends the owed account credentials privately and marks those stock records as delivered.
-5. If stock is insufficient, the owed balance remains pending and the user is told to try again later.
+3. The user starts the bot in DMs and runs `/claim` or `/withdraw`.
+4. If stock is available, the bot sends as many account credentials as available, marks those stock records delivered, and subtracts only delivered credits.
+5. If stock is unavailable, the unclaimed balance remains pending and the user is told to try again later.
 
 ### Admin allocation
 
@@ -179,4 +179,18 @@ All users can run:
 /bonus
 ```
 
-The bot will DM exactly one available bonus account if stock is available and the user is not on the 120-hour (5-day) cooldown. If the bot cannot DM the user, no account is removed from stock and the user should start the bot in DMs before rerunning `/bonus`. Successful bonus claims are logged to the admin log channel with the user ID, username, claim time, account sent, and remaining pool count.
+The bot awards exactly 1 free unclaimed account credit if the user is not on the 120-hour (5-day) cooldown. `/bonus` does not deliver account credentials directly; users claim credits later with `/claim` or `/withdraw`. Successful bonus credit awards are logged to the admin log channel.
+
+
+## Free Credit Games and Explicit Claiming
+
+This is a free bonus credit system only. Users must never deposit money, pay to gamble, or buy credits. Free unclaimed account credits only come from giveaways, `/bonus`, or admin-issued `/give` rewards.
+
+- `1` unclaimed credit = `1` claimable account.
+- Claimed/delivered accounts cannot be used for games.
+- `/start` and ordinary DMs do **not** deliver accounts automatically.
+- Users claim accounts only with `/claim` or `/withdraw`.
+- `/claim` and `/withdraw` deliver by DM only, subtract credits only after the DM succeeds, and prefer partial fulfillment if stock is low.
+- `/slots` costs exactly 1 unclaimed credit per spin and uses this 100% probability table: 66% lose, 18.9% win 1, 7% win 2, 5% win 3, 2% win 6, 1% win 20, 0.1% win 80. Expected RTP: 87.9%.
+- `/coinflip heads|tails` costs exactly 1 unclaimed credit; users have a 40% win chance and 60% loss chance.
+- `/balance`, `/bet`, and `/leaderboard` show/manage free credits without exposing account credentials.

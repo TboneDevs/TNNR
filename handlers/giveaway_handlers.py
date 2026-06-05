@@ -173,11 +173,12 @@ def _winner_public_text(result: dict) -> str:
         "Telegram ID:\n"
         f"{result.get('winner_telegram_id')}\n\n"
         f"{delivery_line}\n\n"
-        "To receive your accounts:\n\n"
+        "To claim your accounts:\n\n"
+        "Start the bot in DMs, then run /claim to claim your accounts.\n\n"
         "1. Start or open the bot:\n"
         f"   {BOT_USERNAME}\n\n"
-        "2. Run /start or send the bot any DM.\n\n"
-        "Only the winning Telegram account can receive this prize."
+        "2. Run /claim or /withdraw.\n\n"
+        "Only the winning Telegram account can claim this prize."
     )
 
 
@@ -193,9 +194,9 @@ def _winner_dm_text(result: dict) -> str:
         "You won:\n"
         f"🏆 {result['prize']}\n\n"
         f"{pending}\n\n"
-        "To receive your accounts, run /start or send me any DM. "
-        "If stock is available, I will deliver them automatically.\n\n"
-        "Only this Telegram account can receive the prize."
+        "Start the bot in DMs, then run /claim to claim your accounts. "
+        "You can also use /withdraw. Accounts are not sent until you claim them.\n\n"
+        "Only this Telegram account can claim the prize."
     )
 
 

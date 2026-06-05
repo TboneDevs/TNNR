@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class Database:
@@ -120,6 +120,15 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 005")
+            applied.add(5)
+        if 6 not in applied:
+            self._migration_006(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (6, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 006")
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -397,6 +406,65 @@ class Database:
                 ON bonus_claims(account_id);
             """
         )
+    def _migration_006(self, conn: sqlite3.Connection):
+        """Add free-credit profile, bet, and game tracking tables."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS credit_profiles (
+                telegram_id INTEGER PRIMARY KEY,
+                username TEXT,
+                display_name TEXT,
+                total_won INTEGER NOT NULL DEFAULT 0,
+                total_claimed INTEGER NOT NULL DEFAULT 0,
+                current_bet INTEGER NOT NULL DEFAULT 1,
+                slots_played INTEGER NOT NULL DEFAULT 0,
+                coinflips_played INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS credit_game_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                command TEXT NOT NULL,
+                amount_wagered INTEGER NOT NULL DEFAULT 0,
+                amount_won INTEGER NOT NULL DEFAULT 0,
+                amount_lost INTEGER NOT NULL DEFAULT 0,
+                new_balance INTEGER NOT NULL DEFAULT 0,
+                result TEXT,
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_credit_profiles_total_won
+                ON credit_profiles(total_won DESC);
+            CREATE INDEX IF NOT EXISTS idx_credit_profiles_balance
+                ON credit_profiles(telegram_id);
+            CREATE INDEX IF NOT EXISTS idx_credit_game_logs_user
+                ON credit_game_logs(telegram_id, created_at);
+            """
+        )
+        now = datetime.utcnow().isoformat()
+        rows = conn.execute(
+            """SELECT telegram_id, COALESCE(SUM(owed_amount), 0), COALESCE(SUM(delivered_amount), 0)
+               FROM account_entitlements
+               GROUP BY telegram_id"""
+        ).fetchall()
+        for telegram_id, total_won, total_claimed in rows:
+            if telegram_id is None:
+                continue
+            conn.execute(
+                """INSERT INTO credit_profiles
+                   (telegram_id, total_won, total_claimed, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(telegram_id) DO UPDATE SET
+                       total_won = MAX(total_won, excluded.total_won),
+                       total_claimed = MAX(total_claimed, excluded.total_claimed),
+                       updated_at = excluded.updated_at""",
+                (telegram_id, int(total_won or 0), int(total_claimed or 0), now, now),
+            )
+
 
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
@@ -410,6 +478,7 @@ class Database:
                 "users", "admins", "giveaways", "entries", "winners", "claim_codes",
                 "account_pool", "redemptions", "audit_logs", "system_logs", "schema_migrations",
                 "account_entitlements", "account_delivery_logs", "bonus_claims",
+                "credit_profiles", "credit_game_logs",
             }
             existing = {row[0] for row in self.execute_all("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = required_tables - existing

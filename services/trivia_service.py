@@ -152,6 +152,8 @@ class TriviaService:
                     prize=prize,
                     created_by_admin_id=admin_id,
                     actor_name=admin_name,
+                    username=winner_entry[2],
+                    display_name=winner_entry[3],
                 )
             db.execute(
                 "UPDATE giveaways SET status = 'winner_selected', active_status = 'winner_selected' WHERE giveaway_id = ?",

@@ -370,14 +370,14 @@ def test_winner_announcement_includes_mycodes_instructions(tmp_path, monkeypatch
     assert public_message[0] == -1003846885691
     assert "CPM-SECRET1" not in public_message[1]
     assert "@AccountTool_Bot" in public_message[1]
-    assert "/start" in public_message[1]
+    assert "/claim" in public_message[1]
     assert "pending balance" in public_message[1]
     assert "@winneruser" in public_message[1]
     assert "42" in public_message[1]
 
     assert winner_dm[0] == 42
     assert "CPM-SECRET1" not in winner_dm[1]
-    assert "/start" in winner_dm[1]
+    assert "/claim" in winner_dm[1]
     assert "pending balance" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
@@ -427,13 +427,13 @@ def test_spin_win_includes_claim_code_and_mycodes_instructions(tmp_path, monkeyp
     assert public_message[0] == -1003846885691
     assert claim_code not in public_message[1]
     assert "@AccountTool_Bot" in public_message[1]
-    assert "/start" in public_message[1]
+    assert "/claim" in public_message[1]
     assert "@spinwinner" in public_message[1]
     assert "43" in public_message[1]
 
     assert winner_dm[0] == 43
     assert claim_code not in winner_dm[1]
-    assert "/start" in winner_dm[1]
+    assert "/claim" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
     assert "Owed amount allocated: 5" in admin_log[1]
@@ -600,7 +600,7 @@ def test_mycodes_no_codes_response(tmp_path, monkeypatch):
     asyncio.run(mycodes(update, context))
 
     assert "🎟️ My Pending Accounts" in message.replies[-1]
-    assert "You do not currently have any pending accounts." in message.replies[-1]
+    assert "You do not currently have any unclaimed account credits." in message.replies[-1]
 
 
 def test_mycodes_lists_pending_direct_balance_without_credentials(tmp_path, monkeypatch):
@@ -621,7 +621,7 @@ def test_mycodes_lists_pending_direct_balance_without_credentials(tmp_path, monk
 
     text = message.replies[-1]
     assert "🎟️ My Pending Accounts" in text
-    assert "You have 2 pending account(s)." in text
+    assert "You have 2 unclaimed account credit(s)." in text
     assert "email" not in text.lower()
     assert "password" not in text.lower()
     assert "9 pending" not in text
@@ -696,13 +696,13 @@ def test_start_and_help_include_mycodes_guidance(tmp_path, monkeypatch):
     update, message = _make_update("/start", chat_type="private", user_id=500)
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
     asyncio.run(start(update, context))
-    assert "automatically" in message.replies[0]
-    assert "no pending accounts" in message.replies[-1]
+    assert "/claim" in message.replies[0]
+    assert "no unclaimed accounts" in message.replies[0]
 
     update, message = _make_update("/help", chat_type="private", user_id=500)
     asyncio.run(help_command(update, context))
     assert "User Commands:" in message.replies[-1]
-    assert "/start" in message.replies[-1]
+    assert "/claim" in message.replies[-1]
     assert "/give TELEGRAM_ID AMOUNT" in message.replies[-1]
 
 
@@ -786,32 +786,28 @@ def test_mycodes_legacy_command_does_not_show_claim_codes(tmp_path, monkeypatch)
 
     asyncio.run(mycodes(update, context))
 
-    assert "1 pending account" in message.replies[-1]
-    assert "/claimcode" not in message.replies[-1]
+    assert "1 unclaimed account credit" in message.replies[-1]
+    assert "/claim" in message.replies[-1]
 
 
-def test_bonus_success_sends_one_account_sets_cooldown_and_logs(tmp_path, monkeypatch):
+def test_bonus_success_awards_credit_sets_cooldown_and_logs(tmp_path, monkeypatch):
     import asyncio
     import types
 
     monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
     db = load_app(tmp_path, monkeypatch)
     from handlers.claim_handlers import bonus
-    from services.pool_service import pool_service
 
-    pool_service.import_accounts(["bonus1@example.com:p1", "bonus2@example.com:p2"], 1, "admin")
     update, message = _make_update("/bonus", chat_type="supergroup", chat_id=-444, user_id=1001)
     update.effective_user.username = "bonususer"
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
 
     asyncio.run(bonus(update, context))
 
-    assert (1001, "🎁 Bonus Account\n\nHere is your bonus account:\nbonus1@example.com:p1\n\nYou can claim another bonus in 5 days. Please save these credentials immediately.") in context.bot.sent
-    assert message.replies[-1] == "✅ Bonus account sent to your DM."
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1001,))[0] == 1
+    assert "✅ Bonus credit added." in message.replies[-1]
     assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1001,))[0] == 1
-    assert any(sent[0] == -1005555555555 and "Bonus account claimed" in sent[1] and "bonus1@example.com:p1" in sent[1] and "Remaining accounts in pool: 1" in sent[1] for sent in context.bot.sent)
+    assert db.execute_one("SELECT COALESCE(SUM(owed_amount - delivered_amount), 0) FROM account_entitlements WHERE telegram_id = ?", (1001,))[0] == 1
+    assert any(sent[0] == -1005555555555 and "Bonus credit claimed" in sent[1] and "New balance: 1" in sent[1] for sent in context.bot.sent)
 
 
 def test_bonus_cooldown_blocks_repeat_and_persists(tmp_path, monkeypatch):
@@ -835,9 +831,9 @@ def test_bonus_cooldown_blocks_repeat_and_persists(tmp_path, monkeypatch):
     context2 = types.SimpleNamespace(args=[], bot=_FakeBot())
     asyncio.run(bonus(update2, context2))
 
-    assert "You already claimed a bonus account" in message2.replies[-1]
+    assert "You already claimed a bonus credit" in message2.replies[-1]
     assert "day" in message2.replies[-1] or "hour" in message2.replies[-1]
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1002,))[0] == 1
+    assert db.execute_one("SELECT COALESCE(SUM(owed_amount - delivered_amount), 0) FROM account_entitlements WHERE telegram_id = ?", (1002,))[0] == 1
     assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1002,))[0] == 1
 
 
@@ -852,7 +848,7 @@ class _SelectiveFailBot(_FakeBot):
         return await super().send_message(chat_id, text)
 
 
-def test_bonus_dm_failure_does_not_remove_stock_or_start_cooldown(tmp_path, monkeypatch):
+def test_bonus_awards_credit_without_touching_stock(tmp_path, monkeypatch):
     import asyncio
     import types
 
@@ -866,19 +862,13 @@ def test_bonus_dm_failure_does_not_remove_stock_or_start_cooldown(tmp_path, monk
 
     asyncio.run(bonus(update, context))
 
-    assert message.replies[-1] == "Please start the bot in DMs first, then rerun /bonus."
+    assert "Bonus credit added" in message.replies[-1]
     assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
-    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1003,))[0] == 0
-
-    # After starting DMs, the same user can rerun successfully.
-    context2 = types.SimpleNamespace(args=[], bot=_FakeBot())
-    update2, message2 = _make_update("/bonus", chat_type="private", user_id=1003)
-    asyncio.run(bonus(update2, context2))
-    assert any(sent[0] == 1003 and "dmfail@example.com:p1" in sent[1] for sent in context2.bot.sent)
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1003,))[0] == 1
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1003,))[0] == 1
+    assert db.execute_one("SELECT COALESCE(SUM(owed_amount - delivered_amount), 0) FROM account_entitlements WHERE telegram_id = ?", (1003,))[0] == 1
 
 
-def test_bonus_no_stock_does_not_update_cooldown(tmp_path, monkeypatch):
+def test_bonus_does_not_require_stock_for_credit_award(tmp_path, monkeypatch):
     import asyncio
     import types
 
@@ -890,31 +880,27 @@ def test_bonus_no_stock_does_not_update_cooldown(tmp_path, monkeypatch):
 
     asyncio.run(bonus(update, context))
 
-    assert message.replies[-1] == "No bonus accounts are available right now. Please try again later."
-    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ?", (1004,))[0] == 0
+    assert "Bonus credit added" in message.replies[-1]
+    assert db.execute_one("SELECT COUNT(*) FROM bonus_claims WHERE telegram_id = ? AND status = 'delivered'", (1004,))[0] == 1
+    assert db.execute_one("SELECT COALESCE(SUM(owed_amount - delivered_amount), 0) FROM account_entitlements WHERE telegram_id = ?", (1004,))[0] == 1
 
 
-def test_bonus_duplicate_in_progress_does_not_double_deliver(tmp_path, monkeypatch):
+def test_bonus_duplicate_cooldown_does_not_double_award(tmp_path, monkeypatch):
     import asyncio
     import types
 
     db = load_app(tmp_path, monkeypatch)
     from handlers.claim_handlers import bonus
-    from services.bonus_service import bonus_service
-    from services.pool_service import pool_service
-
-    pool_service.import_accounts(["dup1@example.com:p1", "dup2@example.com:p2"], 1, "admin")
-    first = bonus_service.begin_claim(1005, "dupe")
-    assert first["status"] == "reserved"
 
     update, message = _make_update("/bonus", chat_type="private", user_id=1005)
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
     asyncio.run(bonus(update, context))
+    update2, message2 = _make_update("/bonus", chat_type="private", user_id=1005)
+    context2 = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(bonus(update2, context2))
 
-    assert "already being processed" in message.replies[-1]
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1005,))[0] == 0
-    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'reserved' AND assigned_user = ?", (1005,))[0] == 1
-    bonus_service.fail_claim(first["claim_id"], 1005, first["account_id"], "TEST_CLEANUP")
+    assert "already claimed a bonus credit" in message2.replies[-1]
+    assert db.execute_one("SELECT COALESCE(SUM(owed_amount - delivered_amount), 0) FROM account_entitlements WHERE telegram_id = ?", (1005,))[0] == 1
 
 
 def test_bonus_handler_registered_and_help_mentions_bonus(tmp_path, monkeypatch):
@@ -939,3 +925,135 @@ def test_bonus_handler_registered_and_help_mentions_bonus(tmp_path, monkeypatch)
     asyncio.run(help_command(update, context))
     assert "/bonus" in message.replies[-1]
     assert "5 days" in message.replies[-1]
+
+
+def test_start_and_private_dm_do_not_auto_deliver_accounts(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import private_delivery_check, start
+    from services.direct_delivery_service import direct_delivery_service
+    from services.pool_service import pool_service
+
+    direct_delivery_service.allocate_owed_accounts(1200, 1, "test", prize="1 Account")
+    pool_service.import_accounts(["auto@example.com:p1"], 1, "admin")
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+
+    update, message = _make_update("/start", chat_type="private", user_id=1200)
+    asyncio.run(start(update, context))
+    assert "/claim" in message.replies[-1]
+    assert direct_delivery_service.get_pending_amount(1200) == 1
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+
+    update2, message2 = _make_update("hello", chat_type="private", user_id=1200)
+    asyncio.run(private_delivery_check(update2, context))
+    assert "Run /claim" in message2.replies[-1]
+    assert direct_delivery_service.get_pending_amount(1200) == 1
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+
+
+def test_balance_bet_slots_and_coinflip_credit_safety(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import balance, bet, coinflip, slots
+    from services.direct_delivery_service import OUT_OF_CREDITS_MESSAGE, direct_delivery_service
+
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    update, message = _make_update("/balance", chat_type="private", user_id=1300)
+    asyncio.run(balance(update, context))
+    assert "Balance: 0 unclaimed account credits" in message.replies[-1]
+
+    update, message = _make_update("/bet 0", chat_type="private", user_id=1300)
+    context.args = ["0"]
+    asyncio.run(bet(update, context))
+    assert message.replies[-1] == "Usage: /bet 1"
+
+    update, message = _make_update("/slots", chat_type="private", user_id=1300)
+    context.args = []
+    asyncio.run(slots(update, context))
+    assert message.replies[-1] == OUT_OF_CREDITS_MESSAGE
+
+    direct_delivery_service.allocate_owed_accounts(1300, 2, "test", prize="2 Accounts")
+    update, message = _make_update("/bet 2", chat_type="private", user_id=1300)
+    context.args = ["2"]
+    asyncio.run(bet(update, context))
+    assert "Bet amount saved" in message.replies[-1]
+
+    # Exercise deterministic service-level odds: lose then 6-credit win.
+    lost = direct_delivery_service.play_slots(1300, "player", roll=0.50)
+    assert lost["won"] == 0 and lost["balance"] == 1
+    win = direct_delivery_service.play_slots(1300, "player", roll=0.98)
+    assert win["won"] == 6 and win["balance"] == 6
+
+    cf_loss = direct_delivery_service.play_coinflip(1300, "heads", "player", roll=0.90)
+    assert cf_loss["won"] is False and cf_loss["balance"] == 5
+    cf_win = direct_delivery_service.play_coinflip(1300, "tails", "player", roll=0.10)
+    assert cf_win["won"] is True and cf_win["balance"] == 6
+    assert direct_delivery_service.get_pending_amount(1300) == 6
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered'")[0] == 0
+
+
+def test_claim_withdraw_partial_and_dm_failure_safety(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import claim, withdraw
+    from services.direct_delivery_service import direct_delivery_service
+    from services.pool_service import pool_service
+
+    pool_service.import_accounts(["claim1@example.com:p1", "claim2@example.com:p2", "claim3@example.com:p3"], 1, "admin")
+    direct_delivery_service.allocate_owed_accounts(1400, 2, "test", prize="2 Accounts")
+    update, message = _make_update("/claim", chat_type="private", user_id=1400)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(claim(update, context))
+    assert any(sent[0] == 1400 and "claim1@example.com:p1" in sent[1] and "claim2@example.com:p2" in sent[1] for sent in context.bot.sent)
+    assert direct_delivery_service.get_pending_amount(1400) == 0
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1400,))[0] == 2
+
+    # DM failure preserves reserved stock and balance.
+    direct_delivery_service.allocate_owed_accounts(1401, 1, "test", prize="1 Account")
+    update2, message2 = _make_update("/claim", chat_type="supergroup", chat_id=-99, user_id=1401)
+    context2 = types.SimpleNamespace(args=[], bot=_SelectiveFailBot(fail_chat_id=1401))
+    asyncio.run(claim(update2, context2))
+    assert message2.replies[-1] == "Please open the bot in private messages first, then rerun /claim."
+    assert direct_delivery_service.get_pending_amount(1401) == 1
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+
+    # Partial fulfillment delivers available stock and leaves the rest as credits.
+    direct_delivery_service.allocate_owed_accounts(1402, 3, "test", prize="3 Accounts")
+    update3, message3 = _make_update("/withdraw", chat_type="private", user_id=1402)
+    context3 = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(withdraw(update3, context3))
+    assert any(sent[0] == 1402 and "claim3@example.com:p3" in sent[1] for sent in context3.bot.sent)
+    assert direct_delivery_service.get_pending_amount(1402) == 2
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered' AND assigned_user = ?", (1402,))[0] == 1
+
+
+def test_leaderboard_and_giveaway_credit_allocation_no_account_exposure(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import leaderboard
+    from services.direct_delivery_service import direct_delivery_service
+    from services.guess_service import guess_service
+
+    gid = guess_service.create_giveaway(1, 10, 7, "3 Accounts", 1, "admin")
+    guess_service.submit_entry(gid, 1500, "winnername", "Winner Name", 501, "7")
+    result = guess_service.select_winner(gid, 1, "admin")
+    assert result["owed_amount"] == 3
+    assert direct_delivery_service.get_pending_amount(1500) == 3
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered'")[0] == 0
+
+    update, message = _make_update("/leaderboard", chat_type="private", user_id=1500)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(leaderboard(update, context))
+    assert "Free Credit Leaderboard" in message.replies[-1]
+    assert "winnername" in message.replies[-1]
+    assert "@" in message.replies[-1]
+    assert "email" not in message.replies[-1].lower()
+    assert "password" not in message.replies[-1].lower()

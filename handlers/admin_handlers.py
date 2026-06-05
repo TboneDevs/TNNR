@@ -167,7 +167,7 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @_admin_only
 async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Assign direct owed accounts to a Telegram user."""
+    """Assign free unclaimed account credits to a Telegram user."""
     if len(context.args) != 2:
         await update.message.reply_text("Usage: /give TELEGRAM_ID AMOUNT")
         return
@@ -204,11 +204,11 @@ async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     await update.message.reply_text(
-        "✅ Owed accounts assigned.\n\n"
+        "✅ Free account credits assigned.\n\n"
         f"Telegram ID: {telegram_id}\n"
-        f"Amount added: {amount}\n"
-        f"Pending balance now: {result.get('pending')}\n\n"
-        "The user can DM the bot or run /start to receive available accounts."
+        f"Credits added: {amount}\n"
+        f"Unclaimed balance now: {result.get('pending')}\n\n"
+        "The user can start the bot in DMs, then run /claim to claim accounts."
     )
 
 

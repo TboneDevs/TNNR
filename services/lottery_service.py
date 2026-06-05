@@ -116,6 +116,8 @@ class LotteryService:
                         source_type='spin_winner',
                         giveaway_id=giveaway_id,
                         prize=prize,
+                        username=username,
+                        display_name=display_name,
                     )
 
             # Record entry
