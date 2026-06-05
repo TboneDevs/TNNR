@@ -6,6 +6,7 @@ from telegram.ext import CommandHandler, ContextTypes
 from config import ADMIN_IDS, ANNOUNCEMENT_CHANNEL_ID, DATABASE_PATH, DISCUSSION_GROUP_ID, RAILWAY_VOLUME_MOUNT_PATH
 from database.database import db
 from services.pool_service import pool_service
+from services.direct_delivery_service import direct_delivery_service
 from utils.channel_utils import ANNOUNCEMENT_CHANNEL_USERNAME, classify_group_error, classify_telegram_error, start_discussion_read_test, verify_discussion_group
 from utils.permissions import is_admin
 from utils.recovery_manager import recovery_manager
@@ -164,6 +165,53 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+@_admin_only
+async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Assign direct owed accounts to a Telegram user."""
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /give TELEGRAM_ID AMOUNT")
+        return
+    try:
+        telegram_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("Telegram ID and amount must be numbers. Usage: /give 123456789 3")
+        return
+    if telegram_id <= 0:
+        await update.message.reply_text("Telegram ID must be a positive integer.")
+        return
+    if amount <= 0:
+        await update.message.reply_text("Amount must be a positive integer.")
+        return
+    admin = update.effective_user
+    result = direct_delivery_service.admin_give(admin.id, admin.username or admin.full_name, telegram_id, amount)
+    if not result.get("success"):
+        await update.message.reply_text(f"❌ Could not assign accounts: {result.get('message')}")
+        return
+    if ADMIN_LOG_CHANNEL_ID:
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_LOG_CHANNEL_ID,
+                text=(
+                    "➕ /give allocation created\n\n"
+                    f"Admin ID: {admin.id}\n"
+                    f"Admin username: @{admin.username if admin.username else 'None'}\n"
+                    f"Target Telegram ID: {telegram_id}\n"
+                    f"Amount assigned: {amount}\n"
+                    f"Pending balance now: {result.get('pending')}"
+                ),
+            )
+        except Exception:
+            pass
+    await update.message.reply_text(
+        "✅ Owed accounts assigned.\n\n"
+        f"Telegram ID: {telegram_id}\n"
+        f"Amount added: {amount}\n"
+        f"Pending balance now: {result.get('pending')}\n\n"
+        "The user can DM the bot or run /start to receive available accounts."
+    )
+
+
 def register_admin_handlers(application):
     application.add_handler(CommandHandler("diagnostics", diagnostics))
     application.add_handler(CommandHandler("pool_status", pool_status))
@@ -172,3 +220,4 @@ def register_admin_handlers(application):
     application.add_handler(CommandHandler("health", health))
     application.add_handler(CommandHandler("channeltest", channeltest))
     application.add_handler(CommandHandler("discussiontest", discussiontest))
+    application.add_handler(CommandHandler("give", give))

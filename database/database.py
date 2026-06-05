@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -102,6 +102,15 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 003")
+            applied.add(3)
+        if 4 not in applied:
+            self._migration_004(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (4, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 004")
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -280,6 +289,79 @@ class Database:
         conn.execute("UPDATE entries SET guessed_number = COALESCE(guessed_number, entry_number)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_entries_source_type ON entries(source_type)")
 
+    def _migration_004(self, conn: sqlite3.Connection):
+        """Add direct owed-account delivery tables and migrate unredeemed winners."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS account_entitlements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                owed_amount INTEGER NOT NULL DEFAULT 0,
+                delivered_amount INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                source_type TEXT,
+                giveaway_id TEXT,
+                prize TEXT,
+                created_by_admin_id INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS account_delivery_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                amount_requested INTEGER NOT NULL DEFAULT 0,
+                amount_delivered INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                reason TEXT,
+                trigger TEXT,
+                account_ids TEXT,
+                entitlement_ids TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_account_entitlements_user_status
+                ON account_entitlements(telegram_id, status);
+            CREATE INDEX IF NOT EXISTS idx_account_entitlements_giveaway
+                ON account_entitlements(giveaway_id);
+            CREATE INDEX IF NOT EXISTS idx_account_delivery_logs_user
+                ON account_delivery_logs(telegram_id);
+            """
+        )
+
+        import re
+        migrated_at = datetime.utcnow().isoformat()
+        rows = conn.execute(
+            """SELECT id, telegram_id, prize, giveaway_id, created_at
+               FROM winners
+               WHERE COALESCE(claimed_status, 0) = 0"""
+        ).fetchall()
+        for row in rows:
+            prize = row[2] or ""
+            match = re.search(r"\b(\d+)\b", prize)
+            if match:
+                amount = int(match.group(1))
+            elif re.search(r"\baccount\b", prize, re.IGNORECASE):
+                amount = 1
+            else:
+                continue
+            if amount <= 0:
+                continue
+            existing = conn.execute(
+                """SELECT id FROM account_entitlements
+                   WHERE telegram_id = ? AND giveaway_id = ? AND source_type = 'legacy_claim_migration'
+                   LIMIT 1""",
+                (row[1], row[3]),
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(
+                """INSERT INTO account_entitlements
+                   (telegram_id, owed_amount, delivered_amount, status, source_type, giveaway_id, prize, created_at, updated_at)
+                   VALUES (?, ?, 0, 'pending', 'legacy_claim_migration', ?, ?, ?, ?)""",
+                (row[1], amount, row[3], prize, row[4] or migrated_at, migrated_at),
+            )
+
 
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
@@ -292,6 +374,7 @@ class Database:
             required_tables = {
                 "users", "admins", "giveaways", "entries", "winners", "claim_codes",
                 "account_pool", "redemptions", "audit_logs", "system_logs", "schema_migrations",
+                "account_entitlements", "account_delivery_logs",
             }
             existing = {row[0] for row in self.execute_all("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = required_tables - existing

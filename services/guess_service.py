@@ -3,7 +3,7 @@ import secrets
 import uuid
 from datetime import datetime
 from database.database import db
-from utils.claimcode import generate_claim_code
+from services.direct_delivery_service import direct_delivery_service, parse_account_amount
 from utils.validators import validate_number
 from utils.audit_logger import audit_log
 
@@ -154,21 +154,27 @@ class GuessService:
                         closest_entries.append(entry)
                 winner_entry = closest_entries[secrets.randbelow(len(closest_entries))]
 
-            claim_code = generate_claim_code()
+            account_amount = parse_account_amount(prize)
+            internal_ref = f"DIRECT-{giveaway_id}-{winner_entry[1]}"
             winner_cursor = db.execute(
                 """INSERT INTO winners
                    (claim_code, giveaway_id, telegram_id, username, display_name, prize, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (claim_code, giveaway_id, winner_entry[1], winner_entry[2],
+                (internal_ref, giveaway_id, winner_entry[1], winner_entry[2],
                  winner_entry[3], prize, datetime.now())
             )
-            db.execute(
-                """INSERT OR IGNORE INTO claim_codes
-                   (code, winner_id, telegram_id, prize, status, created_at)
-                   VALUES (?, ?, ?, ?, 'unclaimed', ?)""",
-                (claim_code, winner_cursor.lastrowid, winner_entry[1], prize, datetime.now())
-            )
             db.commit()
+            allocation = {'success': False, 'message': 'Could not determine account quantity', 'amount': 0}
+            if account_amount:
+                allocation = direct_delivery_service.allocate_owed_accounts(
+                    telegram_id=winner_entry[1],
+                    amount=account_amount,
+                    source_type='guess_winner',
+                    giveaway_id=giveaway_id,
+                    prize=prize,
+                    created_by_admin_id=admin_id,
+                    actor_name=admin_name,
+                )
             db.execute(
                 "UPDATE giveaways SET status = 'winner_selected', active_status = 'winner_selected' WHERE giveaway_id = ?",
                 (giveaway_id,)
@@ -194,7 +200,9 @@ class GuessService:
                 'first_name': winner_entry[6],
                 'last_name': winner_entry[7],
                 'source_type': winner_entry[8],
-                'claim_code': claim_code,
+                'owed_amount': account_amount or 0,
+                'allocation_success': allocation.get('success', False),
+                'allocation_message': allocation.get('message'),
                 'prize': prize,
                 'giveaway_id': giveaway_id,
                 'giveaway_type': 'guess',

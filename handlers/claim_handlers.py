@@ -7,6 +7,7 @@ from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import ADMIN_LOG_CHANNEL_ID
 from services.claim_service import claim_service
+from services.direct_delivery_service import direct_delivery_service
 from services.pool_service import pool_service
 from utils.permissions import is_admin
 
@@ -39,65 +40,119 @@ def _format_won_at(value) -> str:
     return text
 
 
+async def _reply_with_direct_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE, trigger: str = "dm"):
+    """Attempt direct owed-account delivery and reply with the outcome."""
+    user = update.effective_user
+    result = direct_delivery_service.attempt_delivery_for_user(
+        user.id, user.username or getattr(user, "full_name", None), trigger=trigger
+    )
+    if result.get("status") == "delivered":
+        lines = [
+            "✅ Pending Accounts Delivered",
+            f"Accounts delivered: {result.get('accounts_delivered', 0)}",
+            "",
+            "Your Accounts:",
+        ]
+        lines.extend(f"{idx}. {account}" for idx, account in enumerate(result.get("accounts", []), start=1))
+        lines.append("")
+        lines.append("Please save these credentials immediately.")
+        await update.message.reply_text("\n".join(lines))
+        await _send_direct_delivery_admin_log(context, user, result)
+        return result
+    if result.get("status") == "insufficient_stock":
+        await update.message.reply_text(
+            "⏳ You have pending accounts, but stock is temporarily unavailable.\n\n"
+            "Your balance was not reduced. Please try again later."
+        )
+        await _send_direct_delivery_admin_log(context, user, result)
+        return result
+    if result.get("status") == "error":
+        await update.message.reply_text("❌ Delivery could not be completed right now. Please try again later.")
+        return result
+    await update.message.reply_text("You have no pending accounts to receive right now.")
+    return result
+
+
+async def _send_direct_delivery_admin_log(context: ContextTypes.DEFAULT_TYPE, user, result: dict):
+    if not ADMIN_LOG_CHANNEL_ID:
+        return
+    try:
+        if result.get("status") == "delivered":
+            text = (
+                "✅ Direct account delivery completed\n\n"
+                f"Telegram ID: {user.id}\n"
+                f"Username: @{user.username if user.username else 'None'}\n"
+                f"Display name: {getattr(user, 'full_name', None)}\n"
+                f"Accounts delivered: {result.get('accounts_delivered')}\n"
+                f"Delivery ref: {result.get('delivery_ref')}\n"
+                f"Timestamp: {datetime.utcnow().isoformat()}Z"
+            )
+        else:
+            text = (
+                "⚠️ Direct account delivery failed\n\n"
+                f"Telegram ID: {user.id}\n"
+                f"Username: @{user.username if user.username else 'None'}\n"
+                f"Pending amount: {result.get('owed_amount')}\n"
+                f"Available stock: {result.get('available')}\n"
+                f"Reason: {result.get('status')}\n"
+                f"Timestamp: {datetime.utcnow().isoformat()}Z"
+            )
+        await context.bot.send_message(chat_id=ADMIN_LOG_CHANNEL_ID, text=text)
+    except Exception:
+        return
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to TNNR Giveaways.\n\n"
-        "🎟️ If you won a giveaway, run:\n\n"
-        "/mycodes\n\n"
-        "to view your unclaimed claim codes.\n\n"
-        "Then redeem using:\n\n"
-        "/claimcode CPM-XXXXX"
+        "If you are owed accounts, I will deliver them automatically here in DM.\n"
+        "You can run /start any time to check for pending accounts."
     )
+    if getattr(update.effective_chat, "type", None) == "private":
+        await _reply_with_direct_delivery(update, context, trigger="start")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "TNNR Bot Help\n\n"
         "User Commands:\n\n"
+        "/start\n"
+        "Check for and automatically receive any pending accounts.\n\n"
         "/mycodes\n"
-        "View your unclaimed giveaway claim codes.\n\n"
+        "Legacy command: claim codes are no longer required; this checks your pending direct-delivery balance.\n\n"
         "/claimcode CPM-XXXXX\n"
-        "Redeem a claim code and automatically receive your prize."
+        "Legacy command: claim codes are deprecated. Open DM or run /start to receive pending accounts.\n\n"
+        "Admin Commands:\n\n"
+        "/give TELEGRAM_ID AMOUNT\n"
+        "Assign direct owed accounts to a Telegram user."
     )
 
 
 async def mycodes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lookup-only list of the caller's unclaimed codes."""
+    """Backward-compatible lookup for the new direct-delivery system."""
     user = update.effective_user
-    codes = claim_service.list_unclaimed_codes(user.id)
-    if not codes:
+    pending = direct_delivery_service.get_pending_amount(user.id)
+    if pending <= 0:
         await update.message.reply_text(
-            "🎟️ My Claim Codes\n\n"
-            "You do not currently have any unclaimed codes.\n\n"
+            "🎟️ My Pending Accounts\n\n"
+            "You do not currently have any pending accounts.\n\n"
             "If you recently won, make sure you are using the same Telegram account that entered the giveaway."
         )
         return
+    await update.message.reply_text(
+        "🎟️ My Pending Accounts\n\n"
+        f"You have {pending} pending account(s).\n\n"
+        "Claim codes are no longer required. Run /start or send me any DM to receive them automatically."
+    )
 
-    lines = [
-        "🎟️ My Unclaimed Claim Codes",
-        "",
-        f"You have {len(codes)} unclaimed code(s):",
-        "",
-    ]
-    for idx, code in enumerate(codes, start=1):
-        lines.extend([
-            f"{idx}. Claim Code:",
-            f"   {code['claim_code']}",
-            "",
-            "Prize:",
-            str(code.get('prize') or 'Unknown'),
-            "",
-            "Giveaway:",
-            str(code.get('giveaway_type') or 'Giveaway'),
-            "",
-            "Won:",
-            _format_won_at(code.get('won_at')),
-            "",
-            "Redeem with:",
-            f"/claimcode {code['claim_code']}",
-            "",
-        ])
-    await update.message.reply_text("\n".join(lines).rstrip())
+
+async def private_delivery_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Deliver owed accounts when a normal user DMs the bot."""
+    if not update.message or not update.effective_user:
+        return
+    if getattr(update.effective_chat, "type", None) != "private":
+        return
+    await _reply_with_direct_delivery(update, context, trigger="private_dm")
 
 
 async def _send_redemption_admin_log(context: ContextTypes.DEFAULT_TYPE, user, result: dict):
@@ -139,23 +194,22 @@ def _extract_claim_code_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def claimcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    raw_code = _extract_claim_code_input(update, context)
-    if not raw_code:
-        await update.message.reply_text("Usage: /claimcode CPM-XXXXXX")
-        return
+    """Backward-compatible claim-code command. Direct delivery is primary."""
     chat = update.effective_chat
     if getattr(chat, "type", None) != "private":
-        await update.message.reply_text("❌ Claim codes can only be redeemed in a private DM with the bot.")
+        await update.message.reply_text("❌ Account delivery can only be handled in a private DM with the bot.")
         return
+    raw_code = _extract_claim_code_input(update, context)
     user = update.effective_user
-    if is_admin(user.id):
-        status = claim_service.get_claim_status(raw_code)
-        if status.get("found"):
-            await update.message.reply_text(
-                f"Claim: {status['code']}\nWinner: {status['winner']} ({status['winner_id']})\n"
-                f"Prize: {status['prize']}\nClaimed: {status['claimed']}\nClaimed at: {status['claimed_at']}"
-            )
-            return
+    if not raw_code:
+        await update.message.reply_text(
+            "Claim codes are no longer required. I will check your Telegram ID for pending accounts now."
+        )
+        await _reply_with_direct_delivery(update, context, trigger="legacy_claimcode")
+        return
+
+    # Legacy compatibility: old unredeemed codes can still be redeemed, but
+    # new winner/admin flows allocate direct owed balances instead.
     result = claim_service.redeem_claim_code(raw_code, user.id, user.username or user.full_name)
     if not result["success"]:
         await update.message.reply_text(result["message"])
@@ -221,3 +275,4 @@ def register_claim_handlers(application):
     application.add_handler(CommandHandler("pool_add_single", pool_add_single))
     application.add_handler(CommandHandler("pool_mark_invalid", pool_mark_invalid))
     application.add_handler(MessageHandler(filters.Document.ALL, receive_pool_file))
+    application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_delivery_check))

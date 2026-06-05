@@ -3,7 +3,7 @@ import secrets
 import uuid
 from datetime import datetime
 from database.database import db
-from utils.claimcode import generate_claim_code
+from services.direct_delivery_service import direct_delivery_service, parse_account_amount
 from utils.audit_logger import audit_log
 
 logger = logging.getLogger('tnnr.services.lottery')
@@ -96,26 +96,27 @@ class LotteryService:
             # Spin the machine
             win = secrets.randbelow(100) < (win_odds * 100)
 
-            claim_code = None
+            account_amount = None
+            allocation = {'success': False, 'message': None, 'amount': 0}
             if win:
-                # Generate claim code
-                claim_code = generate_claim_code()
+                account_amount = parse_account_amount(prize)
+                internal_ref = f"DIRECT-{giveaway_id}-{telegram_id}-{message_id}"
 
-                # Create winner record and mirror the code in claim_codes for
-                # durable lookup/auditing compatibility.
                 winner_cursor = db.execute(
                     """INSERT INTO winners
                        (claim_code, giveaway_id, telegram_id, username, display_name, prize, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (claim_code, giveaway_id, telegram_id, username, display_name, prize, datetime.now())
-                )
-                db.execute(
-                    """INSERT OR IGNORE INTO claim_codes
-                       (code, winner_id, telegram_id, prize, status, created_at)
-                       VALUES (?, ?, ?, ?, 'unclaimed', ?)""",
-                    (claim_code, winner_cursor.lastrowid, telegram_id, prize, datetime.now())
+                    (internal_ref, giveaway_id, telegram_id, username, display_name, prize, datetime.now())
                 )
                 db.commit()
+                if account_amount:
+                    allocation = direct_delivery_service.allocate_owed_accounts(
+                        telegram_id=telegram_id,
+                        amount=account_amount,
+                        source_type='spin_winner',
+                        giveaway_id=giveaway_id,
+                        prize=prize,
+                    )
 
             # Record entry
             cursor = db.execute(
@@ -132,7 +133,9 @@ class LotteryService:
             return {
                 'win': win,
                 'prize': prize if win else None,
-                'claim_code': claim_code,
+                'owed_amount': account_amount or 0,
+                'allocation_success': allocation.get('success', False),
+                'allocation_message': allocation.get('message'),
                 'winner_telegram_id': telegram_id,
                 'winner_username': username,
                 'display_name': display_name,

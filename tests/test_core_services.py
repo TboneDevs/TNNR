@@ -70,7 +70,9 @@ def test_guess_winner_selection(tmp_path, monkeypatch):
     assert guess_service.submit_entry(gid, 11, "u11", "User 11", 102, "70")
     result = guess_service.select_winner(gid, 1, "admin")
     assert result["winner_telegram_id"] == 10
-    assert result["claim_code"].startswith("CPM-")
+    assert result["owed_amount"] == 1
+    assert result["allocation_success"] is True
+    assert db.execute_one("SELECT owed_amount FROM account_entitlements WHERE telegram_id = ?", (10,))[0] == 1
 
 
 def test_application_builds_and_handlers_register(tmp_path, monkeypatch):
@@ -348,7 +350,9 @@ def test_winner_announcement_includes_mycodes_instructions(tmp_path, monkeypatch
         "last_name": "User",
         "source_message_id": 1234,
         "source_type": "discussion_group",
-        "claim_code": "CPM-SECRET1",
+        "owed_amount": 5,
+        "allocation_success": True,
+        "allocation_message": None,
         "prize": "5 Accounts",
         "giveaway_id": "TRIVIA-PRIVATE",
         "giveaway_type": "trivia",
@@ -364,25 +368,23 @@ def test_winner_announcement_includes_mycodes_instructions(tmp_path, monkeypatch
     admin_log = bot.sent[2]
 
     assert public_message[0] == -1003846885691
-    assert "CPM-SECRET1" in public_message[1]
+    assert "CPM-SECRET1" not in public_message[1]
     assert "@AccountTool_Bot" in public_message[1]
-    assert "/mycodes" in public_message[1]
-    assert "/claimcode CPM-SECRET1" in public_message[1]
+    assert "/start" in public_message[1]
+    assert "pending balance" in public_message[1]
     assert "@winneruser" in public_message[1]
     assert "42" in public_message[1]
 
     assert winner_dm[0] == 42
-    assert "CPM-SECRET1" in winner_dm[1]
-    assert "@AccountTool_Bot" in winner_dm[1]
-    assert "/mycodes" in winner_dm[1]
-    assert "/claimcode CPM-SECRET1" in winner_dm[1]
+    assert "CPM-SECRET1" not in winner_dm[1]
+    assert "/start" in winner_dm[1]
+    assert "pending balance" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
-    assert "CPM-SECRET1" in admin_log[1]
+    assert "Owed amount allocated: 5" in admin_log[1]
     assert "Username: @winneruser" in admin_log[1]
     assert "Telegram ID: 42" in admin_log[1]
     assert "Giveaway ID: TRIVIA-PRIVATE" in admin_log[1]
-    assert "Claimed status: unclaimed" in admin_log[1]
     assert "Public announcement sent: yes" in admin_log[1]
     assert "Winner DM sent: yes" in admin_log[1]
     assert message.replies[-1] == "✅ Winner selected and announced."
@@ -411,7 +413,9 @@ def test_spin_win_includes_claim_code_and_mycodes_instructions(tmp_path, monkeyp
     asyncio.run(collect_discussion_entry(update, context))
 
     winner = db.execute_one("SELECT claim_code FROM winners WHERE giveaway_id = ?", (gid,))
-    assert winner and winner[0].startswith("CPM-")
+    assert winner and winner[0].startswith("DIRECT-")
+    owed = db.execute_one("SELECT owed_amount FROM account_entitlements WHERE telegram_id = ?", (43,))
+    assert owed and owed[0] == 5
     claim_code = winner[0]
     assert message.replies == []
     assert len(bot.sent) == 3
@@ -421,21 +425,18 @@ def test_spin_win_includes_claim_code_and_mycodes_instructions(tmp_path, monkeyp
     admin_log = bot.sent[2]
 
     assert public_message[0] == -1003846885691
-    assert claim_code in public_message[1]
+    assert claim_code not in public_message[1]
     assert "@AccountTool_Bot" in public_message[1]
-    assert "/mycodes" in public_message[1]
-    assert f"/claimcode {claim_code}" in public_message[1]
+    assert "/start" in public_message[1]
     assert "@spinwinner" in public_message[1]
     assert "43" in public_message[1]
 
     assert winner_dm[0] == 43
-    assert claim_code in winner_dm[1]
-    assert "@AccountTool_Bot" in winner_dm[1]
-    assert "/mycodes" in winner_dm[1]
-    assert f"/claimcode {claim_code}" in winner_dm[1]
+    assert claim_code not in winner_dm[1]
+    assert "/start" in winner_dm[1]
 
     assert admin_log[0] == -1005555555555
-    assert claim_code in admin_log[1]
+    assert "Owed amount allocated: 5" in admin_log[1]
     assert "Username: @spinwinner" in admin_log[1]
 
 
@@ -463,7 +464,7 @@ def test_claimcode_redeem_is_blocked_outside_private_dm(tmp_path, monkeypatch):
 
     asyncio.run(claimcode(update, context))
 
-    assert message.replies[-1] == "❌ Claim codes can only be redeemed in a private DM with the bot."
+    assert message.replies[-1] == "❌ Account delivery can only be handled in a private DM with the bot."
     assert "CPM-PRIVATE" not in message.replies[-1]
     assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-PRIVATE",))[0] == 0
 
@@ -566,10 +567,10 @@ def test_claimcode_handler_joins_spaced_code_args_in_private_dm(tmp_path, monkey
     assert db.execute_one("SELECT claimed_status FROM winners WHERE claim_code = ?", ("CPM-AbC125",))[0] == 1
 
 
-def test_winner_generated_claim_code_is_registered_and_redeemable_case_insensitively(tmp_path, monkeypatch):
+def test_winner_generated_direct_balance_is_deliverable(tmp_path, monkeypatch):
     db = load_app(tmp_path, monkeypatch)
     from services.guess_service import guess_service
-    from services.claim_service import claim_service
+    from services.direct_delivery_service import direct_delivery_service
     from services.pool_service import pool_service
 
     pool_service.import_accounts(["draw@example.com:p1"], 1, "admin")
@@ -577,15 +578,13 @@ def test_winner_generated_claim_code_is_registered_and_redeemable_case_insensiti
     assert guess_service.submit_entry(gid, 77, "drawinner", "Draw Winner", 7001, "7")
 
     result = guess_service.select_winner(gid, 1, "admin")
-    code = result["claim_code"]
-
-    assert db.execute_one("SELECT claim_code FROM winners WHERE claim_code = ?", (code,))[0] == code
-    assert db.execute_one("SELECT code FROM claim_codes WHERE code = ?", (code,))[0] == code
-    redeemed = claim_service.redeem_claim_code(code.lower(), 77, "drawinner")
-    assert redeemed["success"] is True
-    assert redeemed["accounts"] == ["draw@example.com:p1"]
-    assert db.execute_one("SELECT status FROM claim_codes WHERE code = ?", (code,))[0] == "redeemed"
-
+    assert result["owed_amount"] == 1
+    assert result["allocation_success"] is True
+    assert db.execute_one("SELECT owed_amount FROM account_entitlements WHERE telegram_id = ?", (77,))[0] == 1
+    delivered = direct_delivery_service.attempt_delivery_for_user(77, "drawinner", "test")
+    assert delivered["success"] is True
+    assert delivered["accounts"] == ["draw@example.com:p1"]
+    assert direct_delivery_service.get_pending_amount(77) == 0
 
 
 def test_mycodes_no_codes_response(tmp_path, monkeypatch):
@@ -600,24 +599,20 @@ def test_mycodes_no_codes_response(tmp_path, monkeypatch):
 
     asyncio.run(mycodes(update, context))
 
-    assert "🎟️ My Claim Codes" in message.replies[-1]
-    assert "You do not currently have any unclaimed codes." in message.replies[-1]
+    assert "🎟️ My Pending Accounts" in message.replies[-1]
+    assert "You do not currently have any pending accounts." in message.replies[-1]
 
 
-def test_mycodes_lists_only_requesters_unclaimed_codes(tmp_path, monkeypatch):
+def test_mycodes_lists_pending_direct_balance_without_credentials(tmp_path, monkeypatch):
     import asyncio
     import types
 
     db = load_app(tmp_path, monkeypatch)
     from handlers.claim_handlers import mycodes
+    from services.direct_delivery_service import direct_delivery_service
 
-    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("LOTTERY-MY", "lottery", "5 Accounts", "winner_selected", 1))
-    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("TRIVIA-MY", "trivia", "1 Account", "winner_selected", 1))
-    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", ("CPM-ONE111", "LOTTERY-MY", 200, "u200", "5 Accounts", 0, "2026-06-04 20:30:00"))
-    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", ("CPM-TWO222", "TRIVIA-MY", 200, "u200", "1 Account", 0, "2026-06-04 21:10:00"))
-    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPM-USED33", "TRIVIA-MY", 200, "u200", "1 Account", 1))
-    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPM-OTHER1", "TRIVIA-MY", 201, "u201", "1 Account", 0))
-    db.commit()
+    direct_delivery_service.allocate_owed_accounts(200, 2, "test", prize="2 Accounts")
+    direct_delivery_service.allocate_owed_accounts(201, 9, "test", prize="9 Accounts")
 
     update, message = _make_update("/mycodes", chat_type="private", user_id=200)
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
@@ -625,15 +620,11 @@ def test_mycodes_lists_only_requesters_unclaimed_codes(tmp_path, monkeypatch):
     asyncio.run(mycodes(update, context))
 
     text = message.replies[-1]
-    assert "🎟️ My Unclaimed Claim Codes" in text
-    assert "You have 2 unclaimed code(s):" in text
-    assert "CPM-ONE111" in text
-    assert "CPM-TWO222" in text
-    assert "CPM-USED33" not in text
-    assert "CPM-OTHER1" not in text
-    assert "/claimcode CPM-ONE111" in text
-    assert "5 Accounts" in text
-    assert "Lottery" in text
+    assert "🎟️ My Pending Accounts" in text
+    assert "You have 2 pending account(s)." in text
+    assert "email" not in text.lower()
+    assert "password" not in text.lower()
+    assert "9 pending" not in text
 
 
 def test_claim_lookup_accepts_old_no_hyphen_stored_codes(tmp_path, monkeypatch):
@@ -705,14 +696,14 @@ def test_start_and_help_include_mycodes_guidance(tmp_path, monkeypatch):
     update, message = _make_update("/start", chat_type="private", user_id=500)
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
     asyncio.run(start(update, context))
-    assert "/mycodes" in message.replies[-1]
-    assert "/claimcode CPM-XXXXX" in message.replies[-1]
+    assert "automatically" in message.replies[0]
+    assert "no pending accounts" in message.replies[-1]
 
     update, message = _make_update("/help", chat_type="private", user_id=500)
     asyncio.run(help_command(update, context))
     assert "User Commands:" in message.replies[-1]
-    assert "/mycodes" in message.replies[-1]
-    assert "/claimcode CPM-XXXXX" in message.replies[-1]
+    assert "/start" in message.replies[-1]
+    assert "/give TELEGRAM_ID AMOUNT" in message.replies[-1]
 
 
 def test_claim_code_normalization_handles_unicode_and_hidden_copy_paste(tmp_path, monkeypatch):
@@ -781,21 +772,19 @@ def test_claim_validation_distinguishes_not_found_from_malformed(tmp_path, monke
     assert malformed["message"].startswith("❌ Invalid claim code.")
 
 
-def test_mycodes_displays_canonical_redeemable_format_for_old_codes(tmp_path, monkeypatch):
+def test_mycodes_legacy_command_does_not_show_claim_codes(tmp_path, monkeypatch):
     import asyncio
     import types
 
     db = load_app(tmp_path, monkeypatch)
     from handlers.claim_handlers import mycodes
+    from services.direct_delivery_service import direct_delivery_service
 
-    db.execute("INSERT INTO giveaways (giveaway_id, type, prize, status, created_by) VALUES (?, ?, ?, ?, ?)", ("MY-OLD-FORMAT", "trivia", "1 Account", "winner_selected", 1))
-    db.execute("INSERT INTO winners (claim_code, giveaway_id, telegram_id, username, prize, claimed_status) VALUES (?, ?, ?, ?, ?, ?)", ("CPMABC123", "MY-OLD-FORMAT", 904, "winner", "1 Account", 0))
-    db.commit()
-
+    direct_delivery_service.allocate_owed_accounts(904, 1, "test", prize="1 Account")
     update, message = _make_update("/mycodes", chat_type="private", user_id=904)
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
 
     asyncio.run(mycodes(update, context))
 
-    assert "CPM-ABC123" in message.replies[-1]
-    assert "/claimcode CPM-ABC123" in message.replies[-1]
+    assert "1 pending account" in message.replies[-1]
+    assert "/claimcode" not in message.replies[-1]

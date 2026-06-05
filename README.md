@@ -75,8 +75,9 @@ See `.env.example` for a copy/paste template.
 - `/pool_add_single email@example.com:password` — add one account to the pool.
 - `/pool_status` — inventory status counts.
 - `/pool_mark_invalid email@example.com` — mark an account invalid.
-- `/mycodes` — normal users can view their own unclaimed giveaway claim codes.
-- `/claimcode CPM-XXXXXX` — admins can look up a code; users redeem their own code from a private DM.
+- `/give TELEGRAM_ID AMOUNT` — admin-only direct allocation of owed accounts to a Telegram user.
+- `/mycodes` — legacy user command that now reports pending direct-delivery balance; claim codes are no longer required.
+- `/claimcode CPM-XXXXXX` — legacy compatibility command; users should normally open DM or run `/start` for automatic delivery.
 
 ## Giveaway announcement channel flow
 
@@ -88,7 +89,7 @@ Run `/channeltest` and `/discussiontest` in a bot DM or the admin log channel af
 
 ## Database tables
 
-The migration system creates: `users`, `admins`, `giveaways`, `entries`, `winners`, `claim_codes`, `account_pool`, `redemptions`, `audit_logs`, `system_logs`, and `schema_migrations`.
+The migration system creates: `users`, `admins`, `giveaways`, `entries`, `winners`, `claim_codes`, `account_pool`, `redemptions`, `account_entitlements`, `account_delivery_logs`, `audit_logs`, `system_logs`, and `schema_migrations`.
 
 ## Inventory upload format
 
@@ -101,15 +102,20 @@ account2@example.com:password2
 
 Malformed lines, duplicate emails, and invalid email addresses are skipped. Passwords are stored for prize delivery and are not printed to logs.
 
-## Claim process
+## Direct account delivery process
 
-1. A giveaway service selects a winner and creates a unique claim code.
-2. Public winner announcements and winner DMs tell the winner to start `@AccountTool_Bot`, run `/mycodes`, and redeem with `/claimcode CPM-XXXXX`.
-3. `/mycodes` is user-safe and lookup-only: it shows only unclaimed codes for the Telegram account running the command and never exposes account credentials, reserves accounts, or marks codes claimed.
-4. `/claimcode` must be run in a private DM. The parser accepts safe case/format variations such as `CPM-ABC123`, `cpm-abc123`, `CPMABC123`, and `CPM_ABC123`.
-5. The bot validates Telegram ownership, stock, and previous redemption state.
-6. Accounts are reserved before delivery and marked delivered only after the redemption flow completes.
-7. Redemptions and critical actions are written to the audit log.
+Claim codes are no longer required for account delivery. The direct-delivery flow is:
+
+1. A giveaway winner is selected or an admin runs `/give TELEGRAM_ID AMOUNT`.
+2. The bot records a persistent owed-account balance for that Telegram ID in `account_entitlements`.
+3. The winner opens the bot DM, sends any normal private message, or runs `/start`.
+4. The bot checks pending owed accounts by Telegram ID.
+5. If enough `account_pool` stock is available, the bot atomically marks those stock rows delivered, sends the credentials privately, and reduces the owed balance.
+6. If stock is insufficient, the owed balance is not reduced and the bot logs the failed delivery.
+7. Delivery attempts are serialized with a SQLite `BEGIN IMMEDIATE` transaction to prevent duplicate delivery when users send multiple messages quickly.
+
+`/claimcode` and `/mycodes` are retained only for backward compatibility/helpful guidance. They are no longer required for users to receive accounts.
+
 
 ## Local development
 
@@ -133,3 +139,33 @@ Admin tests:
 
 - `/channeltest` posts `✅ Channel Test Successful` to `@TnnrCPM` and returns the channel message ID.
 - `/discussiontest` verifies discussion group access, sends `✅ Discussion Group Test Successful`, and starts the live read phrase test. Send `test trivia access` in the discussion group or as a channel comment to confirm the bot can read routed comments/messages.
+
+## Direct Account Delivery
+
+Claim codes are no longer required for account delivery. The bot now tracks pending owed accounts by Telegram user ID and delivers accounts automatically when the winning user opens a private DM with the bot or runs `/start`.
+
+### User flow
+
+1. A winner is selected or an admin assigns accounts with `/give`.
+2. The bot records a pending owed-account balance for that Telegram user ID.
+3. The user opens the bot DM or runs `/start`.
+4. If enough stock is available, the bot sends the owed account credentials privately and marks those stock records as delivered.
+5. If stock is insufficient, the owed balance remains pending and the user is told to try again later.
+
+### Admin allocation
+
+```text
+/give TELEGRAM_ID AMOUNT
+```
+
+Example:
+
+```text
+/give 123456789 3
+```
+
+`/give` is admin-only. It validates the Telegram ID and amount, adds to any existing pending balance, logs the allocation, and tells the admin the user can DM the bot or run `/start` to receive available accounts.
+
+### Legacy commands
+
+`/claimcode` and `/mycodes` are retained for backward compatibility/helpful guidance, but users do not need a claim code to receive accounts. `/mycodes` now reports pending direct-delivery balances instead of exposing claim codes or account credentials.

@@ -157,8 +157,13 @@ def _winner_handle(result: dict) -> str:
 
 
 def _winner_public_text(result: dict) -> str:
-    """Build the public winner announcement with /mycodes claim instructions."""
-    claim_code = result.get("claim_code")
+    """Build the public winner announcement for direct account delivery."""
+    owed = result.get("owed_amount") or 0
+    delivery_line = (
+        f"{owed} account(s) have been added to your pending balance."
+        if owed else
+        "Your prize is pending admin review because the account quantity could not be determined automatically."
+    )
     return (
         "🎉 Giveaway Winner!\n\n"
         "Prize:\n"
@@ -167,38 +172,30 @@ def _winner_public_text(result: dict) -> str:
         f"{_winner_handle(result)}\n\n"
         "Telegram ID:\n"
         f"{result.get('winner_telegram_id')}\n\n"
-        "Claim Code:\n"
-        f"{claim_code}\n\n"
-        "To claim your prize:\n\n"
-        "1. Start the bot:\n"
+        f"{delivery_line}\n\n"
+        "To receive your accounts:\n\n"
+        "1. Start or open the bot:\n"
         f"   {BOT_USERNAME}\n\n"
-        "2. Run:\n"
-        "   /mycodes\n\n"
-        "3. Copy your unclaimed claim code.\n\n"
-        "4. Redeem it with:\n"
-        f"   /claimcode {claim_code}\n\n"
-        "Only the winning Telegram account can redeem this code."
+        "2. Run /start or send the bot any DM.\n\n"
+        "Only the winning Telegram account can receive this prize."
     )
 
 
 def _winner_dm_text(result: dict) -> str:
-    claim_code = result.get("claim_code")
+    owed = result.get("owed_amount") or 0
+    pending = (
+        f"{owed} account(s) were added to your pending balance."
+        if owed else
+        "Your prize is pending admin review because the account quantity could not be determined automatically."
+    )
     return (
         "🎉 Congratulations!\n\n"
         "You won:\n"
         f"🏆 {result['prize']}\n\n"
-        "Your Claim Code:\n"
-        f"{claim_code}\n\n"
-        "To receive your accounts:\n\n"
-        "1. Start or open the bot:\n"
-        f"   {BOT_USERNAME}\n\n"
-        "2. Run:\n"
-        "   /mycodes\n\n"
-        "3. Find your unclaimed code.\n\n"
-        "4. Redeem with:\n"
-        f"   /claimcode {claim_code}\n\n"
-        "Save/Copy your code before closing this message.\n\n"
-        "Only this Telegram account can redeem the prize."
+        f"{pending}\n\n"
+        "To receive your accounts, run /start or send me any DM. "
+        "If stock is available, I will deliver them automatically.\n\n"
+        "Only this Telegram account can receive the prize."
     )
 
 
@@ -208,13 +205,14 @@ def _winner_admin_text(result: dict, public_sent: bool = False, dm_sent: bool = 
         f"Giveaway type: {result.get('giveaway_type')}\n"
         f"Giveaway ID: {result.get('giveaway_id')}\n"
         f"Prize: {result.get('prize')}\n"
-        f"Claim code: {result.get('claim_code')}\n"
+        f"Owed amount allocated: {result.get('owed_amount')}\n"
+        f"Allocation success: {'yes' if result.get('allocation_success') else 'no'}\n"
+        f"Allocation message: {result.get('allocation_message')}\n"
         f"Telegram ID: {result.get('winner_telegram_id')}\n"
         f"Username: @{result.get('winner_username')}\n"
         f"First name: {result.get('first_name')}\n"
         f"Last name: {result.get('last_name')}\n"
         f"Display name: {result.get('display_name')}\n"
-        "Claimed status: unclaimed\n"
         f"Public announcement sent: {'yes' if public_sent else 'no'}\n"
         f"Winner DM sent: {'yes' if dm_sent else 'no'}\n"
         f"Source message ID: {result.get('source_message_id')}\n"
