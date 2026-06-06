@@ -3,7 +3,7 @@
 Unclaimed account credits are stored as account_entitlements keyed by Telegram
 user ID.  One credit equals one claimable account.  Credits are free only and
 come from giveaways, /bonus, or admin /give allocations.  Accounts are delivered
-only through explicit /claim or /withdraw flows.
+only through explicit /claim or /withdraw flows. Event credits are promotional: they can be wagered in games, but only winnings become withdrawable account credits.
 """
 
 import logging
@@ -19,6 +19,7 @@ logger = logging.getLogger("tnnr.services.direct_delivery")
 OUT_OF_CREDITS_MESSAGE = "You are out of credits. Win or receive more unclaimed accounts before playing again."
 CLAIM_DM_FAILURE_MESSAGE = "Please open the bot in private messages first, then rerun /claim."
 NO_UNCLAIMED_MESSAGE = "You have no unclaimed accounts available."
+PROMOTIONAL_WITHDRAW_MESSAGE = "Event promotional credits cannot be withdrawn directly. Use them in /slots or /coinflip first; only winnings become withdrawable credits."
 SLOTS_NOTE = "Slots uses 1 credit per spin. Run /slots again to spin another credit."
 
 
@@ -59,12 +60,18 @@ class DirectDeliveryService:
                                giveaway_id: str | None = None, prize: str | None = None,
                                created_by_admin_id: int | None = None,
                                actor_name: str | None = None, username: str | None = None,
-                               display_name: str | None = None) -> dict:
-        """Add free unclaimed account credits to a user's balance."""
+                               display_name: str | None = None, credit_type: str = "withdrawable") -> dict:
+        """Add free unclaimed account credits to a user's balance.
+
+        ``credit_type`` is either ``withdrawable`` (claimable accounts) or
+        ``promotional`` (event credits that can only be wagered).
+        """
         if not isinstance(telegram_id, int) or telegram_id <= 0:
             return {"success": False, "message": "Invalid Telegram ID"}
         if not isinstance(amount, int) or amount <= 0:
             return {"success": False, "message": "Amount must be a positive integer"}
+        if credit_type not in {"withdrawable", "promotional"}:
+            return {"success": False, "message": "Invalid credit type"}
         conn = db.connect()
         try:
             if conn.in_transaction:
@@ -75,15 +82,15 @@ class DirectDeliveryService:
             conn.execute(
                 """INSERT INTO account_entitlements
                    (telegram_id, owed_amount, delivered_amount, status, source_type, giveaway_id,
-                    prize, created_by_admin_id, created_at, updated_at)
-                   VALUES (?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?)""",
-                (telegram_id, amount, source_type, giveaway_id, prize, created_by_admin_id, now, now),
+                    prize, created_by_admin_id, credit_type, created_at, updated_at)
+                   VALUES (?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?)""",
+                (telegram_id, amount, source_type, giveaway_id, prize, created_by_admin_id, credit_type, now, now),
             )
             conn.execute(
                 """UPDATE credit_profiles
                    SET total_won = total_won + ?, updated_at = ?
                    WHERE telegram_id = ?""",
-                (amount, now, telegram_id),
+                (amount if credit_type == "withdrawable" else 0, now, telegram_id),
             )
             conn.commit()
             pending = DirectDeliveryService.get_pending_amount(telegram_id)
@@ -91,7 +98,7 @@ class DirectDeliveryService:
                 action="FREE_CREDITS_ADDED",
                 actor_id=created_by_admin_id,
                 actor_name=actor_name,
-                details=f"Telegram ID: {telegram_id}, Amount: {amount}, Source: {source_type}, Giveaway: {giveaway_id}, Prize: {prize}, New balance: {pending}",
+                details=f"Telegram ID: {telegram_id}, Amount: {amount}, Credit type: {credit_type}, Source: {source_type}, Giveaway: {giveaway_id}, Prize: {prize}, New withdrawable balance: {pending}",
                 result="SUCCESS",
             )
             return {"success": True, "telegram_id": telegram_id, "amount": amount, "pending": pending}
@@ -124,27 +131,41 @@ class DirectDeliveryService:
         return result
 
     @staticmethod
-    def get_pending_entitlements(telegram_id: int) -> list[dict]:
+    def get_pending_entitlements(telegram_id: int, credit_type: str = "withdrawable") -> list[dict]:
         rows = db.execute_all(
-            """SELECT id, telegram_id, owed_amount, delivered_amount, status, source_type, giveaway_id, prize, created_at
+            """SELECT id, telegram_id, owed_amount, delivered_amount, status, source_type, giveaway_id, prize, credit_type, created_at
                FROM account_entitlements
-               WHERE telegram_id = ? AND status IN ('pending', 'partial')
+               WHERE telegram_id = ? AND credit_type = ? AND status IN ('pending', 'partial')
                  AND owed_amount > delivered_amount
                ORDER BY created_at ASC, id ASC""",
-            (telegram_id,),
+            (telegram_id, credit_type),
         )
         return [dict(row) for row in rows]
 
     @staticmethod
-    def get_pending_amount(telegram_id: int) -> int:
+    def _get_amount_by_type(telegram_id: int, credit_type: str) -> int:
         row = db.execute_one(
             """SELECT COALESCE(SUM(owed_amount - delivered_amount), 0)
                FROM account_entitlements
-               WHERE telegram_id = ? AND status IN ('pending', 'partial')
+               WHERE telegram_id = ? AND credit_type = ? AND status IN ('pending', 'partial')
                  AND owed_amount > delivered_amount""",
-            (telegram_id,),
+            (telegram_id, credit_type),
         )
         return max(0, int(row[0] or 0)) if row else 0
+
+    @staticmethod
+    def get_pending_amount(telegram_id: int) -> int:
+        """Withdrawable account credits available for /claim or /withdraw."""
+        return DirectDeliveryService._get_amount_by_type(telegram_id, "withdrawable")
+
+    @staticmethod
+    def get_promotional_amount(telegram_id: int) -> int:
+        """Promotional event credits available for games only."""
+        return DirectDeliveryService._get_amount_by_type(telegram_id, "promotional")
+
+    @staticmethod
+    def get_playable_amount(telegram_id: int) -> int:
+        return DirectDeliveryService.get_pending_amount(telegram_id) + DirectDeliveryService.get_promotional_amount(telegram_id)
 
     @staticmethod
     def get_balance_summary(telegram_id: int, username: str | None = None, display_name: str | None = None) -> dict:
@@ -155,9 +176,13 @@ class DirectDeliveryService:
             "SELECT total_won, total_claimed, current_bet FROM credit_profiles WHERE telegram_id = ?",
             (telegram_id,),
         )
-        balance = DirectDeliveryService.get_pending_amount(telegram_id)
+        withdrawable = DirectDeliveryService.get_pending_amount(telegram_id)
+        promotional = DirectDeliveryService.get_promotional_amount(telegram_id)
         return {
-            "balance": balance,
+            "balance": withdrawable,
+            "withdrawable_balance": withdrawable,
+            "promotional_balance": promotional,
+            "playable_balance": withdrawable + promotional,
             "total_won": int(profile[0] or 0) if profile else 0,
             "total_claimed": int(profile[1] or 0) if profile else 0,
             "current_bet": int(profile[2] or 1) if profile else 1,
@@ -167,7 +192,7 @@ class DirectDeliveryService:
     def set_current_bet(telegram_id: int, amount: int, username: str | None = None, display_name: str | None = None) -> dict:
         if not isinstance(amount, int) or amount <= 0:
             return {"success": False, "message": "Usage: /bet 1"}
-        balance = DirectDeliveryService.get_pending_amount(telegram_id)
+        balance = DirectDeliveryService.get_playable_amount(telegram_id)
         if balance < amount:
             return {"success": False, "message": OUT_OF_CREDITS_MESSAGE}
         conn = db.connect()
@@ -185,15 +210,15 @@ class DirectDeliveryService:
             return {"success": False, "message": str(exc)}
 
     @staticmethod
-    def _subtract_credits(conn, telegram_id: int, amount: int):
+    def _subtract_credits(conn, telegram_id: int, amount: int, credit_type: str = "withdrawable"):
         remaining = amount
         rows = conn.execute(
             """SELECT id, owed_amount, delivered_amount
                FROM account_entitlements
-               WHERE telegram_id = ? AND status IN ('pending', 'partial')
+               WHERE telegram_id = ? AND credit_type = ? AND status IN ('pending', 'partial')
                  AND owed_amount > delivered_amount
                ORDER BY created_at ASC, id ASC""",
-            (telegram_id,),
+            (telegram_id, credit_type),
         ).fetchall()
         for row in rows:
             if remaining <= 0:
@@ -212,19 +237,19 @@ class DirectDeliveryService:
             raise RuntimeError("Insufficient credits during debit")
 
     @staticmethod
-    def _add_game_credits(conn, telegram_id: int, amount: int, source_type: str, username: str | None = None):
+    def _add_game_credits(conn, telegram_id: int, amount: int, source_type: str, username: str | None = None, credit_type: str = "withdrawable") :
         if amount <= 0:
             return
         now = _now()
         conn.execute(
             """INSERT INTO account_entitlements
-               (telegram_id, owed_amount, delivered_amount, status, source_type, prize, created_at, updated_at)
-               VALUES (?, ?, 0, 'pending', ?, ?, ?, ?)""",
-            (telegram_id, amount, source_type, f"{amount} Free Credit{'s' if amount != 1 else ''}", now, now),
+               (telegram_id, owed_amount, delivered_amount, status, source_type, prize, credit_type, created_at, updated_at)
+               VALUES (?, ?, 0, 'pending', ?, ?, ?, ?, ?)""",
+            (telegram_id, amount, source_type, f"{amount} Free Credit{'s' if amount != 1 else ''}", credit_type, now, now),
         )
         conn.execute(
             "UPDATE credit_profiles SET total_won = total_won + ?, updated_at = ? WHERE telegram_id = ?",
-            (amount, now, telegram_id),
+            (amount if credit_type == "withdrawable" else 0, now, telegram_id),
         )
 
     @staticmethod
@@ -238,6 +263,17 @@ class DirectDeliveryService:
         )
 
     @staticmethod
+    def _choose_wager_source(telegram_id: int, amount: int = 1) -> tuple[str | None, int, int]:
+        """Prefer promotional credits for game wagers, then withdrawable credits."""
+        promotional = DirectDeliveryService.get_promotional_amount(telegram_id)
+        withdrawable = DirectDeliveryService.get_pending_amount(telegram_id)
+        if promotional >= amount:
+            return "promotional", promotional, withdrawable
+        if withdrawable >= amount:
+            return "withdrawable", promotional, withdrawable
+        return None, promotional, withdrawable
+
+    @staticmethod
     def play_slots(telegram_id: int, username: str | None = None, roll: float | None = None) -> dict:
         conn = db.connect()
         try:
@@ -245,11 +281,12 @@ class DirectDeliveryService:
                 conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             DirectDeliveryService._ensure_profile(conn, telegram_id, username)
-            balance = DirectDeliveryService.get_pending_amount(telegram_id)
-            if balance < 1:
+            source, promotional_balance, withdrawable_balance = DirectDeliveryService._choose_wager_source(telegram_id, 1)
+            playable_balance = promotional_balance + withdrawable_balance
+            if source is None:
                 conn.commit()
-                return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": balance}
-            DirectDeliveryService._subtract_credits(conn, telegram_id, 1)
+                return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": withdrawable_balance, "promotional_balance": promotional_balance, "playable_balance": playable_balance}
+            DirectDeliveryService._subtract_credits(conn, telegram_id, 1, source)
             r = random.random() if roll is None else roll
             # Probability buckets total 100.0%: 66, 18.9, 7, 5, 2, 1, 0.1.
             if r < 0.66:
@@ -274,22 +311,23 @@ class DirectDeliveryService:
                 won = 80
                 tier = "ultra_80"
             if won:
-                DirectDeliveryService._add_game_credits(conn, telegram_id, won, "slots_win", username)
+                DirectDeliveryService._add_game_credits(conn, telegram_id, won, "slots_win", username, "withdrawable")
             conn.execute(
                 "UPDATE credit_profiles SET slots_played = slots_played + 1, updated_at = ? WHERE telegram_id = ?",
                 (_now(), telegram_id),
             )
             new_balance = DirectDeliveryService.get_pending_amount(telegram_id)
-            DirectDeliveryService._log_game(conn, telegram_id, username, "/slots", 1, won, 0 if won else 1, new_balance, tier)
+            new_promotional = DirectDeliveryService.get_promotional_amount(telegram_id)
+            DirectDeliveryService._log_game(conn, telegram_id, username, "/slots", 1, won, 0 if won else 1, new_balance, tier, f"source={source}; promotional_balance={new_promotional}")
             conn.commit()
             audit_log.log(
                 action="SLOTS_PLAYED",
                 actor_id=telegram_id,
                 actor_name=username,
-                details=f"Wagered: 1, Won: {won}, Result: {tier}, New balance: {new_balance}",
+                details=f"Wagered: 1, Source: {source}, Won: {won}, Result: {tier}, Withdrawable balance: {new_balance}, Promotional balance: {new_promotional}",
                 result="SUCCESS",
             )
-            return {"success": True, "won": won, "tier": tier, "balance": new_balance}
+            return {"success": True, "won": won, "tier": tier, "balance": new_balance, "withdrawable_balance": new_balance, "promotional_balance": new_promotional, "wager_source": source}
         except Exception as exc:
             logger.error("Slots play failed: %s", exc)
             try:
@@ -309,31 +347,34 @@ class DirectDeliveryService:
                 conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             DirectDeliveryService._ensure_profile(conn, telegram_id, username)
-            balance = DirectDeliveryService.get_pending_amount(telegram_id)
-            if balance < 1:
+            source, promotional_balance, withdrawable_balance = DirectDeliveryService._choose_wager_source(telegram_id, 1)
+            playable_balance = promotional_balance + withdrawable_balance
+            if source is None:
                 conn.commit()
-                return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": balance}
-            DirectDeliveryService._subtract_credits(conn, telegram_id, 1)
+                return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": withdrawable_balance, "promotional_balance": promotional_balance, "playable_balance": playable_balance}
+            DirectDeliveryService._subtract_credits(conn, telegram_id, 1, source)
             r = random.random() if roll is None else roll
             won = r < 0.40
             payout = 2 if won else 0
-            if payout:
-                DirectDeliveryService._add_game_credits(conn, telegram_id, payout, "coinflip_win", username)
+            credited = 1 if (won and source == "promotional") else payout
+            if credited:
+                DirectDeliveryService._add_game_credits(conn, telegram_id, credited, "coinflip_win", username, "withdrawable")
             conn.execute(
                 "UPDATE credit_profiles SET coinflips_played = coinflips_played + 1, updated_at = ? WHERE telegram_id = ?",
                 (_now(), telegram_id),
             )
             new_balance = DirectDeliveryService.get_pending_amount(telegram_id)
-            DirectDeliveryService._log_game(conn, telegram_id, username, "/coinflip", 1, payout, 0 if won else 1, new_balance, "win" if won else "loss", f"choice={normalized}")
+            new_promotional = DirectDeliveryService.get_promotional_amount(telegram_id)
+            DirectDeliveryService._log_game(conn, telegram_id, username, "/coinflip", 1, credited, 0 if won else 1, new_balance, "win" if won else "loss", f"choice={normalized}; source={source}; payout={payout}; promotional_balance={new_promotional}")
             conn.commit()
             audit_log.log(
                 action="COINFLIP_PLAYED",
                 actor_id=telegram_id,
                 actor_name=username,
-                details=f"Choice: {normalized}, Wagered: 1, Won: {payout}, New balance: {new_balance}",
+                details=f"Choice: {normalized}, Wagered: 1, Source: {source}, Withdrawable credited: {credited}, New withdrawable balance: {new_balance}, Promotional balance: {new_promotional}",
                 result="SUCCESS",
             )
-            return {"success": True, "won": won, "payout": payout, "choice": normalized, "balance": new_balance}
+            return {"success": True, "won": won, "payout": credited, "raw_payout": payout, "choice": normalized, "balance": new_balance, "withdrawable_balance": new_balance, "promotional_balance": new_promotional, "wager_source": source}
         except Exception as exc:
             logger.error("Coinflip failed: %s", exc)
             try:
@@ -355,8 +396,11 @@ class DirectDeliveryService:
                 conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             owed_total = DirectDeliveryService.get_pending_amount(telegram_id)
+            promotional_total = DirectDeliveryService.get_promotional_amount(telegram_id)
             if owed_total <= 0:
                 conn.commit()
+                if promotional_total > 0:
+                    return {"status": "promotional_only", "success": False, "owed_amount": 0, "promotional_amount": promotional_total, "accounts": []}
                 return {"status": "no_pending", "success": False, "owed_amount": 0, "accounts": []}
             available_count = conn.execute("SELECT COUNT(*) FROM account_pool WHERE status = 'available'").fetchone()[0]
             if available_count <= 0:
@@ -516,7 +560,8 @@ class DirectDeliveryService:
     def get_leaderboard(limit: int = 10) -> dict:
         balance_rows = db.execute_all(
             """SELECT p.telegram_id, p.username, p.total_won, p.total_claimed,
-                      COALESCE(SUM(CASE WHEN e.status IN ('pending','partial') THEN e.owed_amount - e.delivered_amount ELSE 0 END), 0) AS balance
+                      COALESCE(SUM(CASE WHEN e.status IN ('pending','partial') AND e.credit_type = 'withdrawable' THEN e.owed_amount - e.delivered_amount ELSE 0 END), 0) AS balance,
+                      COALESCE(SUM(CASE WHEN e.status IN ('pending','partial') AND e.credit_type = 'promotional' THEN e.owed_amount - e.delivered_amount ELSE 0 END), 0) AS promotional_balance
                FROM credit_profiles p
                LEFT JOIN account_entitlements e ON e.telegram_id = p.telegram_id
                GROUP BY p.telegram_id

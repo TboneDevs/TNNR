@@ -205,11 +205,11 @@ Credit counts such as `/balance` and `/leaderboard` are safe summaries and do no
 
 ## Credit events
 
-Admins can run `/creditevent` to create a new free credit event and post an announcement to the configured announcement channel. Users then DM the bot and run `/eventclaim` to receive a one-time top-up of 3 free credits for the current event. Each new `/creditevent` creates a new event, so users can claim once per event. Event claims are stored persistently and add credits to the same free-credit balance used by `/balance`, `/slots`, `/coinflip`, `/claim`, and `/withdraw`.
+Admins can run `/creditevent` to create a new promotional credit event and post an announcement to the configured announcement channel. Users then DM the bot and run `/eventclaim` to receive a one-time top-up of 3 promotional credits for the current event. Each new `/creditevent` creates a new event, so users can claim once per event. Promotional event credits are non-withdrawable: they can be used for `/slots` or `/coinflip`, and only gambling winnings/profits become normal withdrawable credits for `/claim` or `/withdraw`.
 
 User command:
 
-- `/eventclaim` — claim the current event's 3 free credits in a private DM only.
+- `/eventclaim` — claim the current event's 3 promotional, non-withdrawable credits in a private DM only.
 
 Admin command:
 

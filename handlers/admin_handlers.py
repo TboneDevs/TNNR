@@ -167,7 +167,7 @@ async def creditevent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "To claim:\n"
         "1. DM the bot.\n"
         "2. Run /eventclaim.\n\n"
-        "Credits are free bonus credits only and can be used for /slots, /coinflip, or claimed with /claim."
+        "These are promotional credits only: use them for /slots or /coinflip. Only gambling winnings become withdrawable credits."
     )
     post = await post_announcement(context.bot, announcement_text)
     if not post.ok:
@@ -203,7 +203,7 @@ async def creditevent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     await update.message.reply_text(
-        "Credit event posted successfully. Users can now claim 3 credits with /eventclaim."
+        "Credit event posted successfully. Users can now claim 3 promotional credits with /eventclaim."
     )
 
 

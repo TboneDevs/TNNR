@@ -964,7 +964,8 @@ def test_balance_bet_slots_and_coinflip_credit_safety(tmp_path, monkeypatch):
     context = types.SimpleNamespace(args=[], bot=_FakeBot())
     update, message = _make_update("/balance", chat_type="private", user_id=1300)
     asyncio.run(balance(update, context))
-    assert "Balance: 0 unclaimed account credits" in message.replies[-1]
+    assert "Promotional Credits (non-withdrawable): 0" in message.replies[-1]
+    assert "Withdrawable Credits: 0" in message.replies[-1]
 
     update, message = _make_update("/bet 0", chat_type="private", user_id=1300)
     context.args = ["0"]
@@ -984,9 +985,9 @@ def test_balance_bet_slots_and_coinflip_credit_safety(tmp_path, monkeypatch):
 
     # Exercise deterministic service-level odds: lose then 6-credit win.
     lost = direct_delivery_service.play_slots(1300, "player", roll=0.50)
-    assert lost["won"] == 0 and lost["balance"] == 1
+    assert lost["won"] == 0 and lost["balance"] == 1 and lost["promotional_balance"] == 0
     win = direct_delivery_service.play_slots(1300, "player", roll=0.98)
-    assert win["won"] == 6 and win["balance"] == 6
+    assert win["won"] == 6 and win["balance"] == 6 and win["wager_source"] == "withdrawable"
 
     cf_loss = direct_delivery_service.play_coinflip(1300, "heads", "player", roll=0.90)
     assert cf_loss["won"] is False and cf_loss["balance"] == 5
@@ -1121,7 +1122,7 @@ def test_credit_event_admin_and_user_claim_flow(tmp_path, monkeypatch):
     context = types.SimpleNamespace(args=[], bot=bot)
     asyncio.run(creditevent(admin_update, context))
 
-    assert admin_message.replies[-1] == "Credit event posted successfully. Users can now claim 3 credits with /eventclaim."
+    assert admin_message.replies[-1] == "Credit event posted successfully. Users can now claim 3 promotional credits with /eventclaim."
     assert db.execute_one("SELECT COUNT(*) FROM credit_events WHERE status = 'active'")[0] == 1
     assert any(sent[0] == -1003846885691 and "/eventclaim" in sent[1] for sent in bot.sent)
 
@@ -1129,19 +1130,95 @@ def test_credit_event_admin_and_user_claim_flow(tmp_path, monkeypatch):
     user_update.effective_user.username = "eventuser"
     asyncio.run(eventclaim(user_update, context))
     assert user_message.replies[-1] == "Success! You received 3 event credits."
-    assert direct_delivery_service.get_pending_amount(1700) == 3
+    assert direct_delivery_service.get_pending_amount(1700) == 0
+    assert direct_delivery_service.get_promotional_amount(1700) == 3
 
     dup_update, dup_message = _make_update("/eventclaim", chat_type="private", user_id=1700)
     asyncio.run(eventclaim(dup_update, context))
     assert dup_message.replies[-1] == "You have already claimed this event credit top-up."
-    assert direct_delivery_service.get_pending_amount(1700) == 3
+    assert direct_delivery_service.get_pending_amount(1700) == 0
+    assert direct_delivery_service.get_promotional_amount(1700) == 3
 
     admin_update2, admin_message2 = _make_update("/creditevent", chat_type="private", user_id=1)
     asyncio.run(creditevent(admin_update2, context))
     user_update2, user_message2 = _make_update("/eventclaim", chat_type="private", user_id=1700)
     asyncio.run(eventclaim(user_update2, context))
     assert user_message2.replies[-1] == "Success! You received 3 event credits."
-    assert direct_delivery_service.get_pending_amount(1700) == 6
+    assert direct_delivery_service.get_pending_amount(1700) == 0
+    assert direct_delivery_service.get_promotional_amount(1700) == 6
+
+
+
+def test_promotional_event_credits_cannot_be_withdrawn_and_convert_only_winnings(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.claim_handlers import balance, claim, withdraw
+    from services.credit_event_service import credit_event_service
+    from services.direct_delivery_service import PROMOTIONAL_WITHDRAW_MESSAGE, direct_delivery_service
+    from services.pool_service import pool_service
+
+    credit_event_service.create_event(1, "admin", -1003846885691, 555)
+    result = credit_event_service.claim_current_event(1900, "promo")
+    assert result["success"] is True
+    assert direct_delivery_service.get_promotional_amount(1900) == 3
+    assert direct_delivery_service.get_pending_amount(1900) == 0
+
+    pool_service.import_accounts(["promo1@example.com:p1"], 1, "admin")
+    update, message = _make_update("/claim", chat_type="private", user_id=1900)
+    context = types.SimpleNamespace(args=[], bot=_FakeBot())
+    asyncio.run(claim(update, context))
+    assert message.replies[-1] == PROMOTIONAL_WITHDRAW_MESSAGE
+    assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'available'")[0] == 1
+
+    update, message = _make_update("/withdraw", chat_type="private", user_id=1900)
+    asyncio.run(withdraw(update, context))
+    assert message.replies[-1] == PROMOTIONAL_WITHDRAW_MESSAGE
+
+    lost = direct_delivery_service.play_slots(1900, "promo", roll=0.50)
+    assert lost["wager_source"] == "promotional"
+    assert lost["promotional_balance"] == 2
+    assert lost["withdrawable_balance"] == 0
+
+    won = direct_delivery_service.play_slots(1900, "promo", roll=0.98)
+    assert won["wager_source"] == "promotional"
+    assert won["won"] == 6
+    assert won["promotional_balance"] == 1
+    assert won["withdrawable_balance"] == 6
+
+    update, message = _make_update("/balance", chat_type="private", user_id=1900)
+    asyncio.run(balance(update, context))
+    assert "Promotional Credits (non-withdrawable): 1" in message.replies[-1]
+    assert "Withdrawable Credits: 6" in message.replies[-1]
+
+
+def test_promotional_coinflip_profit_and_mixed_source_priority(tmp_path, monkeypatch):
+    db = load_app(tmp_path, monkeypatch)
+    from services.credit_event_service import credit_event_service
+    from services.direct_delivery_service import direct_delivery_service
+
+    credit_event_service.create_event(1, "admin", -1003846885691, 777)
+    credit_event_service.claim_current_event(1901, "promo")
+    direct_delivery_service.allocate_owed_accounts(1901, 2, "test", prize="2 Accounts")
+
+    loss = direct_delivery_service.play_coinflip(1901, "heads", "promo", roll=0.90)
+    assert loss["wager_source"] == "promotional"
+    assert loss["promotional_balance"] == 2
+    assert loss["withdrawable_balance"] == 2
+
+    win = direct_delivery_service.play_coinflip(1901, "tails", "promo", roll=0.10)
+    assert win["wager_source"] == "promotional"
+    assert win["payout"] == 1
+    assert win["promotional_balance"] == 1
+    assert win["withdrawable_balance"] == 3
+
+    final_promo = direct_delivery_service.play_coinflip(1901, "tails", "promo", roll=0.90)
+    assert final_promo["wager_source"] == "promotional"
+    assert final_promo["promotional_balance"] == 0
+    withdrawable_play = direct_delivery_service.play_coinflip(1901, "tails", "promo", roll=0.10)
+    assert withdrawable_play["wager_source"] == "withdrawable"
+    assert withdrawable_play["withdrawable_balance"] == 4
 
 
 def test_eventclaim_group_does_not_grant_credits(tmp_path, monkeypatch):

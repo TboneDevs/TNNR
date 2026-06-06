@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class Database:
@@ -138,6 +138,16 @@ class Database:
             )
             conn.commit()
             logger.info("Applied migration 007")
+            applied.add(7)
+        if 8 not in applied:
+            self._migration_008(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (8, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 008")
+            applied.add(8)
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -512,6 +522,18 @@ class Database:
         )
 
 
+    def _migration_008(self, conn: sqlite3.Connection):
+        """Separate promotional event credits from withdrawable account credits."""
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(account_entitlements)")}
+        if "credit_type" not in columns:
+            conn.execute("ALTER TABLE account_entitlements ADD COLUMN credit_type TEXT NOT NULL DEFAULT 'withdrawable'")
+        conn.execute("UPDATE account_entitlements SET credit_type = 'withdrawable' WHERE credit_type IS NULL OR credit_type = ''")
+        conn.execute("UPDATE account_entitlements SET credit_type = 'promotional' WHERE source_type = 'credit_event'")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_account_entitlements_user_type_status ON account_entitlements(telegram_id, credit_type, status)"
+        )
+
+
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
         try:
@@ -536,6 +558,10 @@ class Database:
             missing_columns = required_giveaway_columns - giveaway_columns
             if missing_columns:
                 logger.error("Missing giveaway metadata columns: %s", ", ".join(sorted(missing_columns)))
+                return False
+            entitlement_columns = {row[1] for row in self.execute_all("PRAGMA table_info(account_entitlements)")}
+            if "credit_type" not in entitlement_columns:
+                logger.error("Missing account entitlement credit_type column")
                 return False
             return True
         except Exception as exc:

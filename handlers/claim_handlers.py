@@ -13,6 +13,7 @@ from services.direct_delivery_service import (
     CLAIM_DM_FAILURE_MESSAGE,
     NO_UNCLAIMED_MESSAGE,
     OUT_OF_CREDITS_MESSAGE,
+    PROMOTIONAL_WITHDRAW_MESSAGE,
     SLOTS_NOTE,
     direct_delivery_service,
 )
@@ -56,7 +57,8 @@ async def _send_claim_log(context: ContextTypes.DEFAULT_TYPE, user, command: str
             f"Username: @{user.username if user.username else 'None'}\n"
             f"Command used: /{command}\n"
             f"Accounts sent: {result.get('accounts_delivered')}\n"
-            f"New balance: {result.get('balance')}\n"
+            f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))}\n"
+            f"Promotional balance: {result.get('promotional_balance')}\n"
             f"Remaining account pool count: {result.get('remaining_pool')}\n"
             f"Time: {datetime.utcnow().isoformat()}Z"
         )
@@ -83,7 +85,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Welcome to TNNR Giveaways.\n\n"
         "Start the bot in DMs, then run /claim to claim your accounts.\n"
         f"{balance_line}\n\n"
-        "Use /balance to view free unclaimed credits. You can use free credits for /slots, /coinflip, or claim them with /claim."
+        "Use /balance to view withdrawable and promotional credits. Promotional event credits can be used for /slots or /coinflip; only winnings become withdrawable for /claim."
     )
 
 
@@ -103,7 +105,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/bonus\n"
         "Receive 1 free unclaimed account credit every 5 days.\n\n"
         "/eventclaim\n"
-        "Claim the current admin-posted event top-up of 3 free credits. Use in DM only.\n\n"
+        "Claim the current admin-posted event top-up of 3 promotional credits. Use in DM only.\n\n"
         "/slots\n"
         "Use exactly 1 free unclaimed credit for one slots spin.\n\n"
         "/coinflip heads\n"
@@ -123,13 +125,14 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     summary = direct_delivery_service.get_balance_summary(user.id, _username(user), getattr(user, "full_name", None))
     await update.message.reply_text(
-        f"💰 Balance: {summary['balance']} unclaimed account credit{'s' if summary['balance'] != 1 else ''}\n"
+        f"💰 Balance\n"
+        f"Promotional Credits (non-withdrawable): {summary['promotional_balance']}\n"
+        f"Withdrawable Credits: {summary['withdrawable_balance']}\n"
         f"Total accounts won: {summary['total_won']}\n"
         f"Total accounts claimed: {summary['total_claimed']}\n"
-        f"Available credits: {summary['balance']}\n\n"
-        "You can use these credits for /slots, /coinflip, or claim them with /claim."
+        f"Available playable credits: {summary['playable_balance']}\n\n"
+        "Promotional credits can be used for /slots or /coinflip. Only gambling winnings become withdrawable credits. Use /claim to claim withdrawable credits."
     )
-
 
 async def bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1 or not context.args[0].isdigit():
@@ -144,7 +147,7 @@ async def bet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not result.get("success"):
         await update.message.reply_text(result.get("message", "Usage: /bet 1"))
         return
-    await update.message.reply_text(f"✅ Bet amount saved: {amount} credit(s). Current balance: {result.get('balance')} credits.")
+    await update.message.reply_text(f"✅ Bet amount saved: {amount} credit(s). Playable balance: {result.get('balance')} credits. Promotional credits do not become withdrawable until they win in a game.")
 
 
 async def _log_game(context, user, command: str, result: dict):
@@ -157,7 +160,8 @@ async def _log_game(context, user, command: str, result: dict):
             f"Command used: /{command}\n"
             f"Amount wagered: 1\n"
             f"Amount won/lost: {result}\n"
-            f"New balance: {result.get('balance')}\n"
+            f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))}\n"
+            f"Promotional balance: {result.get('promotional_balance')}\n"
             f"Time: {datetime.utcnow().isoformat()}Z"
         ),
     )
@@ -170,19 +174,22 @@ async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result.get("message", OUT_OF_CREDITS_MESSAGE))
         return
     await _log_game(context, user, "slots", result)
+    balance_lines = (
+        f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))} credits.\n"
+        f"Promotional balance: {result.get('promotional_balance', 0)} credits.\n"
+    )
     if result.get("won", 0) <= 0:
         await update.message.reply_text(
             f"🎰 Slots Result: ❌ You lost 1 credit.\n"
-            f"New balance: {result.get('balance')} credits.\n"
+            f"{balance_lines}"
             f"{SLOTS_NOTE}"
         )
     else:
         await update.message.reply_text(
-            f"🎰 Slots Result: 💎 You won {result.get('won')} credits!\n"
-            f"New balance: {result.get('balance')} credits.\n"
+            f"🎰 Slots Result: 💎 You won {result.get('won')} withdrawable credits!\n"
+            f"{balance_lines}"
             f"{SLOTS_NOTE}"
         )
-
 
 async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1 or context.args[0].lower() not in {"heads", "tails"}:
@@ -196,18 +203,24 @@ async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _log_game(context, user, "coinflip", result)
     if result.get("won"):
         await update.message.reply_text(
-            f"🪙 Coinflip Result: ✅ You won 1 credit!\nNew balance: {result.get('balance')} credits."
+            f"🪙 Coinflip Result: ✅ You won {result.get('payout', 1)} withdrawable credit{'s' if result.get('payout', 1) != 1 else ''}!\n"
+            f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))} credits.\n"
+            f"Promotional balance: {result.get('promotional_balance', 0)} credits."
         )
     else:
         await update.message.reply_text(
-            f"🪙 Coinflip Result: ❌ You lost 1 credit.\nNew balance: {result.get('balance')} credits."
+            f"🪙 Coinflip Result: ❌ You lost 1 credit.\n"
+            f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))} credits.\n"
+            f"Promotional balance: {result.get('promotional_balance', 0)} credits."
         )
-
 
 async def _claim_or_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
     user = update.effective_user
     invoked_private = is_private_chat(update)
     prepared = direct_delivery_service.prepare_claim_for_user(user.id, _username(user), trigger=command)
+    if prepared.get("status") == "promotional_only":
+        await update.message.reply_text(PROMOTIONAL_WITHDRAW_MESSAGE)
+        return
     if prepared.get("status") == "no_pending":
         await update.message.reply_text(NO_UNCLAIMED_MESSAGE)
         return
@@ -273,7 +286,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🏆 Free Credit Leaderboard", "", "Current Unclaimed Balance:"]
     for idx, row in enumerate(data["balance"], start=1):
-        lines.append(f"{idx}. {fmt_user(row)} — {int(row.get('balance') or 0)} credits")
+        lines.append(f"{idx}. {fmt_user(row)} — {int(row.get('balance') or 0)} withdrawable / {int(row.get('promotional_balance') or 0)} promotional")
     lines.extend(["", "Total Credits Won:"])
     for idx, row in enumerate(data["total_won"], start=1):
         lines.append(f"{idx}. {fmt_user(row)} — {int(row.get('total_won') or 0)} won")
@@ -340,7 +353,8 @@ async def eventclaim(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Username: @{user.username if user.username else 'None'}\n"
             f"Event ID: {result.get('event_id')}\n"
             f"Credits added: {result.get('amount')}\n"
-            f"New balance: {result.get('balance')}\n"
+            f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))}\n"
+            f"Promotional balance: {result.get('promotional_balance')}\n"
             f"Time: {datetime.utcnow().isoformat()}Z"
         ),
     )
