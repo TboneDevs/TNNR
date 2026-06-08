@@ -16,7 +16,7 @@ from config import BACKUPS_PATH, DATABASE_PATH, EXPORTS_PATH, RAILWAY_VOLUME_MOU
 
 logger = logging.getLogger("tnnr.database")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class Database:
@@ -148,6 +148,15 @@ class Database:
             conn.commit()
             logger.info("Applied migration 008")
             applied.add(8)
+        if 9 not in applied:
+            self._migration_009(conn)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                (9, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            logger.info("Applied migration 009")
+            applied.add(9)
 
     def _migration_001(self, conn: sqlite3.Connection):
         conn.executescript(
@@ -534,6 +543,52 @@ class Database:
         )
 
 
+    def _migration_009(self, conn: sqlite3.Connection):
+        """Add persistent fast giveaway tables."""
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS fast_giveaways (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                giveaway_id TEXT UNIQUE NOT NULL,
+                prize TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                creator_id INTEGER NOT NULL,
+                creator_name TEXT,
+                announcement_channel_id INTEGER NOT NULL,
+                announcement_message_id INTEGER NOT NULL,
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                finalized_at TEXT,
+                total_entries INTEGER NOT NULL DEFAULT 0,
+                winner_telegram_id INTEGER,
+                winner_username TEXT,
+                winner_display_name TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS fast_giveaway_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                giveaway_id TEXT NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                display_name TEXT,
+                entered_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(giveaway_id, telegram_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_fast_giveaways_status_end
+                ON fast_giveaways(status, end_at);
+            CREATE INDEX IF NOT EXISTS idx_fast_giveaway_entries_giveaway
+                ON fast_giveaway_entries(giveaway_id);
+            CREATE INDEX IF NOT EXISTS idx_fast_giveaway_entries_user
+                ON fast_giveaway_entries(telegram_id);
+            """
+        )
+
+
     def validate_startup(self) -> bool:
         """Validate database and storage readiness without crashing the bot."""
         try:
@@ -547,6 +602,7 @@ class Database:
                 "account_pool", "redemptions", "audit_logs", "system_logs", "schema_migrations",
                 "account_entitlements", "account_delivery_logs", "bonus_claims",
                 "credit_profiles", "credit_game_logs", "credit_events", "credit_event_claims",
+                "fast_giveaways", "fast_giveaway_entries",
             }
             existing = {row[0] for row in self.execute_all("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = required_tables - existing

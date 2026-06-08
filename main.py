@@ -14,6 +14,7 @@ from database.database import db
 from handlers.admin_handlers import register_admin_handlers
 from handlers.claim_handlers import register_claim_handlers
 from handlers.giveaway_handlers import register_giveaway_handlers
+from handlers.fastgive_handlers import register_fastgive_handlers, recover_fastgive_tasks
 from utils.channel_utils import verify_announcement_channel, verify_discussion_group
 from utils.logging_utils import setup_logging
 from utils.recovery_manager import recovery_manager
@@ -59,12 +60,19 @@ async def validate_telegram_access(application: Application) -> bool:
     return ok
 
 
+async def startup_post_init(application: Application):
+    """Run Telegram validation and reschedule any active fast giveaways."""
+    await validate_telegram_access(application)
+    await recover_fastgive_tasks(application)
+
+
 def build_application() -> Application:
     """Create and configure the Telegram application."""
-    application = Application.builder().token(BOT_TOKEN).post_init(validate_telegram_access).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(startup_post_init).build()
     register_admin_handlers(application)
     register_claim_handlers(application)
     register_giveaway_handlers(application)
+    register_fastgive_handlers(application)
     return application
 
 

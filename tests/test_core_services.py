@@ -87,7 +87,7 @@ def test_application_builds_and_handlers_register(tmp_path, monkeypatch):
 
     assert app.bot.token == "123:test"
     assert app.handlers
-    assert app.post_init is main.validate_telegram_access
+    assert app.post_init is main.startup_post_init
     registered_handler_count = sum(len(group) for group in app.handlers.values())
     assert registered_handler_count >= 10
     assert db.validate_startup()
@@ -1265,3 +1265,169 @@ def test_eventclaim_group_does_not_grant_credits(tmp_path, monkeypatch):
     assert "DMs" in message.replies[-1]
     assert direct_delivery_service.get_pending_amount(1800) == 0
     assert db.execute_one("SELECT COUNT(*) FROM credit_event_claims WHERE telegram_id = ?", (1800,))[0] == 0
+
+
+def test_fastgive_command_posts_and_persists_without_starting_timer(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from handlers.fastgive_handlers import FASTGIVE_BUTTON_TEXT, fastgive
+
+    class FastgiveBot(_FakeBot):
+        async def send_message(self, chat_id, text, reply_markup=None):
+            msg = await super().send_message(chat_id, text)
+            self.sent[-1] = (chat_id, text, reply_markup)
+            return msg
+
+    class FakeApp:
+        def __init__(self):
+            self.tasks = []
+        def create_task(self, coro, name=None):
+            self.tasks.append(name)
+            coro.close()
+
+    bot = FastgiveBot()
+    app = FakeApp()
+    update, message = _make_update("/fastgive 10 Accounts", chat_type="private", user_id=1)
+    context = types.SimpleNamespace(args=["10", "Accounts"], bot=bot, application=app)
+
+    asyncio.run(fastgive(update, context))
+
+    assert "Fast giveaway started" in message.replies[-1]
+    assert bot.sent[0][0] == -1003846885691
+    assert "⚡ FLASH GIVEAWAY" in bot.sent[0][1]
+    assert "Ends in: 60 Seconds" in bot.sent[0][1]
+    assert bot.sent[0][2] is not None
+    assert FASTGIVE_BUTTON_TEXT in str(bot.sent[0][2].inline_keyboard[0][0].text)
+    row = db.execute_one("SELECT giveaway_id, prize, status, announcement_message_id FROM fast_giveaways")
+    assert row[1] == "10 Accounts"
+    assert row[2] == "active"
+    assert row[3] == 777
+    assert app.tasks and app.tasks[0].startswith("fastgive:")
+
+
+def test_fastgive_rejects_non_admin_and_missing_prize(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    load_app(tmp_path, monkeypatch)
+    from handlers.fastgive_handlers import fastgive
+
+    non_admin_update, non_admin_message = _make_update("/fastgive 10 Accounts", chat_type="private", user_id=999)
+    context = types.SimpleNamespace(args=["10", "Accounts"], bot=_FakeBot(), application=None)
+    asyncio.run(fastgive(non_admin_update, context))
+    assert "Unauthorized" in non_admin_message.replies[-1]
+
+    admin_update, admin_message = _make_update("/fastgive", chat_type="private", user_id=1)
+    asyncio.run(fastgive(admin_update, context))
+    assert admin_message.replies[-1] == "Usage: /fastgive PRIZE"
+
+
+def test_fastgive_entry_accepts_once_blocks_duplicates_bots_and_expired(tmp_path, monkeypatch):
+    import asyncio
+    import types
+
+    db = load_app(tmp_path, monkeypatch)
+    from services import fastgive_service
+    from handlers.fastgive_handlers import fastgive_entry
+
+    gid = "FG-ENTRY1"
+    fastgive_service.create_fast_giveaway(
+        giveaway_id=gid,
+        prize="5,000 Coins",
+        creator_id=1,
+        creator_name="admin",
+        announcement_channel_id=-1003846885691,
+        announcement_message_id=10,
+    )
+
+    class Query:
+        def __init__(self, user):
+            self.data = f"fastgive:{gid}"
+            self.from_user = user
+            self.answers = []
+        async def answer(self, text, show_alert=False):
+            self.answers.append((text, show_alert))
+
+    user = types.SimpleNamespace(id=222, username="entrant", first_name="En", last_name="Trant", full_name="En Trant", is_bot=False)
+    query = Query(user)
+    update = types.SimpleNamespace(callback_query=query)
+    context = types.SimpleNamespace(bot=_FakeBot())
+    asyncio.run(fastgive_entry(update, context))
+    assert query.answers[-1][0] == "👍"
+    assert db.execute_one("SELECT COUNT(*) FROM fast_giveaway_entries WHERE giveaway_id = ? AND telegram_id = ?", (gid, 222))[0] == 1
+
+    query2 = Query(user)
+    asyncio.run(fastgive_entry(types.SimpleNamespace(callback_query=query2), context))
+    assert "already" in query2.answers[-1][0]
+    assert db.execute_one("SELECT COUNT(*) FROM fast_giveaway_entries WHERE giveaway_id = ?", (gid,))[0] == 1
+
+    bot_user = types.SimpleNamespace(id=333, username="bot", first_name="Bot", last_name=None, full_name="Bot", is_bot=True)
+    bot_query = Query(bot_user)
+    asyncio.run(fastgive_entry(types.SimpleNamespace(callback_query=bot_query), context))
+    assert "Bots cannot enter" in bot_query.answers[-1][0]
+
+    db.execute("UPDATE fast_giveaways SET status = 'ended' WHERE giveaway_id = ?", (gid,))
+    db.commit()
+    late_user = types.SimpleNamespace(id=444, username="late", first_name="Late", last_name=None, full_name="Late", is_bot=False)
+    late_query = Query(late_user)
+    asyncio.run(fastgive_entry(types.SimpleNamespace(callback_query=late_query), context))
+    assert "closed" in late_query.answers[-1][0]
+
+
+def test_fastgive_finalize_winner_and_no_entry_cancel(tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv("ADMIN_LOG_CHANNEL_ID", "-1005555555555")
+    db = load_app(tmp_path, monkeypatch)
+    from services import fastgive_service
+    import handlers.fastgive_handlers as fastgive_handlers
+
+    class FastgiveBot(_FakeBot):
+        def __init__(self):
+            super().__init__()
+            self.edits = []
+        async def send_message(self, chat_id, text, reply_markup=None):
+            import types
+            self.sent.append((chat_id, text, reply_markup))
+            return types.SimpleNamespace(message_id=100 + len(self.sent))
+        async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.edits.append((chat_id, message_id, text, reply_markup))
+
+    monkeypatch.setattr(fastgive_handlers.fastgive_service, "choose_winner", lambda entries: entries[0] if entries else None)
+    bot = FastgiveBot()
+
+    gid = "FG-WINNER"
+    fastgive_service.create_fast_giveaway(
+        giveaway_id=gid,
+        prize="$5 PayPal",
+        creator_id=1,
+        creator_name="AdminUser",
+        announcement_channel_id=-1003846885691,
+        announcement_message_id=501,
+    )
+    fastgive_service.add_entry(gid, 5010, "winner", "Win", "Ner", "Win Ner")
+    fastgive_service.add_entry(gid, 5011, "other", "O", "Ther", "O Ther")
+
+    result = asyncio.run(fastgive_handlers.finalize_fastgive(bot, gid))
+    assert result["status"] == "ended"
+    assert db.execute_one("SELECT status, winner_telegram_id, total_entries FROM fast_giveaways WHERE giveaway_id = ?", (gid,))[:3] == ("ended", 5010, 2)
+    assert any("GIVEAWAY ENDED" in edit[2] and "@winner" in edit[2] for edit in bot.edits)
+    assert any(sent[0] == 5010 and "Congratulations" in sent[1] for sent in bot.sent)
+    assert any(sent[0] == -1003846885691 and "Giveaway Winner" in sent[1] for sent in bot.sent)
+    assert any(sent[0] == -1005555555555 and "FAST GIVEAWAY LOG" in sent[1] for sent in bot.sent)
+
+    cancel_gid = "FG-NOENTRY"
+    fastgive_service.create_fast_giveaway(
+        giveaway_id=cancel_gid,
+        prize="CPM2 Account",
+        creator_id=1,
+        creator_name="AdminUser",
+        announcement_channel_id=-1003846885691,
+        announcement_message_id=502,
+    )
+    cancel_result = asyncio.run(fastgive_handlers.finalize_fastgive(bot, cancel_gid))
+    assert cancel_result["status"] == "cancelled"
+    assert db.execute_one("SELECT status FROM fast_giveaways WHERE giveaway_id = ?", (cancel_gid,))[0] == "cancelled"
+    assert any("GIVEAWAY CANCELLED" in edit[2] for edit in bot.edits)

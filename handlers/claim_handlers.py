@@ -117,7 +117,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Show top free-credit balances and totals without account details.\n\n"
         "Admin Commands:\n\n"
         "/give TELEGRAM_ID AMOUNT\n"
-        "Assign free unclaimed account credits to a Telegram user."
+        "Assign free unclaimed account credits to a Telegram user.\n\n"
+        "/fastgive PRIZE\n"
+        "Start a 60-second button giveaway in the announcement channel."
     )
 
 

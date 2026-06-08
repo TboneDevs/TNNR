@@ -76,6 +76,7 @@ See `.env.example` for a copy/paste template.
 - `/pool_status` — inventory status counts.
 - `/pool_mark_invalid email@example.com` — mark an account invalid.
 - `/give TELEGRAM_ID AMOUNT` — admin-only direct allocation of owed accounts to a Telegram user.
+- `/fastgive PRIZE` — admin-only 60-second flash giveaway with a button entry, countdown edits, automatic winner selection, winner DM, channel announcement, and admin log.
 - `/mycodes` — legacy user command that now reports pending direct-delivery balance; claim codes are no longer required.
 - `/claimcode CPM-XXXXXX` — legacy compatibility only; new users should use `/claim` or `/withdraw`.
 
@@ -86,6 +87,12 @@ Giveaway creation commands are intentionally run from a bot DM or the private ad
 If channel posting fails, the bot does not create the giveaway and replies with one of the deployment/debug categories: `BOT_NOT_ADMIN`, `CHANNEL_NOT_FOUND`, `TELEGRAM_API_ERROR`, or `INSUFFICIENT_PERMISSIONS`.
 
 Run `/channeltest` and `/discussiontest` in a bot DM or the admin log channel after deployment. `/channeltest` confirms the bot can post to `@TnnrCPM`; `/discussiontest` confirms access/send capability and starts the live read test phrase. A failure returns the exact Telegram error category and message.
+
+## Fast giveaways
+
+Admins can run `/fastgive PRIZE` from a bot DM or the configured admin log channel. The bot posts a 60-second flash giveaway to the announcement channel with a `🎉 Enter Giveaway` button. The original message is edited at 50, 40, 30, 20, and 10 seconds with the current entry count; no extra countdown messages are sent. Entries are stored in `fast_giveaway_entries` with a unique `(giveaway_id, telegram_id)` constraint so each user can enter once. Bot accounts are ignored. At the end, entries are locked, the button is removed, one winner is selected with server-side randomness, the original message is edited with the winner, the winner is DM'd, a channel winner announcement is posted, and the admin log receives the full giveaway summary. If nobody enters, the original message is edited to a cancellation notice.
+
+If Railway restarts during a 60-second fast giveaway, active giveaways are persisted and rescheduled for finalization from their stored `end_at` timestamp after bot startup. Countdown edits missed during downtime are not replayed, but finalization still occurs safely once the bot is back online. Fast giveaways are generic prize announcements only; they do not send account credentials publicly and do not automatically deliver account inventory.
 
 ## Database tables
 
