@@ -107,7 +107,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/eventclaim\n"
         "Claim the current admin-posted event top-up of 3 promotional credits. Use in DM only.\n\n"
         "/slots\n"
-        "Use exactly 1 free unclaimed credit for one slots spin. Slots are 50% lose / 50% win: 30% small, 13% medium, 5% big, 2% jackpot.\n\n"
+        "Use exactly 1 free unclaimed credit for one slots spin. Slots use the current prize table: 60% lose, with winning tiers from 1 credit up to a 120-credit max jackpot.\n\n"
         "/coinflip heads\n"
         "/coinflip tails\n"
         "Use exactly 1 free unclaimed credit for a true 50% win / 50% lose chance.\n\n"
@@ -176,22 +176,30 @@ async def slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result.get("message", OUT_OF_CREDITS_MESSAGE))
         return
     await _log_game(context, user, "slots", result)
-    balance_lines = (
-        f"Withdrawable balance: {result.get('withdrawable_balance', result.get('balance'))} credits.\n"
-        f"Promotional balance: {result.get('promotional_balance', 0)} credits.\n"
-    )
-    if result.get("won", 0) <= 0:
+    new_balance = result.get("playable_balance", result.get("balance"))
+    won = int(result.get("won", 0) or 0)
+    if won <= 0:
         await update.message.reply_text(
-            f"🎰 Slots Result: ❌ You lost 1 credit.\n"
-            f"{balance_lines}"
+            f"🎰 Slots Result\n"
+            f"❌ You lost 1 credit.\n\n"
+            f"💰 New Balance: {new_balance} credits\n\n"
             f"{SLOTS_NOTE}"
+        )
+    elif result.get("tier") == "max_jackpot":
+        await update.message.reply_text(
+            f"🎰 JACKPOT!!!\n"
+            f"👑 MAX JACKPOT HIT!\n\n"
+            f"You won 120 credits!\n\n"
+            f"💰 New Balance: {new_balance} credits"
         )
     else:
         await update.message.reply_text(
-            f"🎰 Slots Result: 💎 You won {result.get('won')} withdrawable credits!\n"
-            f"{balance_lines}"
+            f"🎰 Slots Result\n"
+            f"{result.get('emoji', '💎')} You won {won} credits!\n\n"
+            f"💰 New Balance: {new_balance} credits\n\n"
             f"{SLOTS_NOTE}"
         )
+
 
 async def coinflip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1 or context.args[0].lower() not in {"heads", "tails"}:

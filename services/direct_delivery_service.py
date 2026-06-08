@@ -20,15 +20,32 @@ OUT_OF_CREDITS_MESSAGE = "You are out of credits. Win or receive more unclaimed 
 CLAIM_DM_FAILURE_MESSAGE = "Please open the bot in private messages first, then rerun /claim."
 NO_UNCLAIMED_MESSAGE = "You have no unclaimed accounts available."
 PROMOTIONAL_WITHDRAW_MESSAGE = "Event promotional credits cannot be withdrawn directly. Use them in /slots or /coinflip first; only winnings become withdrawable credits."
-SLOTS_NOTE = "Slots uses 1 credit per spin with 50% win / 50% lose odds. Run /slots again to spin another credit."
+SLOTS_NOTE = "Slots uses 1 credit per spin. Run /slots again to spin another credit."
 COINFLIP_WIN_PROBABILITY = 0.50
-SLOT_TIERS = (
-    ("lose", 0.50, 0),
-    ("small_win", 0.30, 1),
-    ("medium_win", 0.13, 3),
-    ("big_win", 0.05, 6),
-    ("jackpot_win", 0.02, 80),
+SLOT_SCALE = 100_000
+# The requested winning tier percentages add up to 41% while the requested
+# overall game asks for 60% lose / 40% wins / 100% total.  Keep the 60% loss
+# rate and scale the requested winning tier weights proportionally to the 40%
+# win bucket so the production probability table is valid and exact.
+SLOT_TIER_TABLE = (
+    ("lose", 60000, 0, "❌"),
+    ("bronze_win", 8781, 1, "🥉"),
+    ("silver_win", 8781, 2, "🥈"),
+    ("gold_win", 7805, 3, "🥇"),
+    ("diamond_win", 4878, 4, "💎"),
+    ("fire_win", 3902, 5, "🔥"),
+    ("rocket_win", 1951, 6, "🚀"),
+    ("money_win", 1463, 8, "💰"),
+    ("trophy_win", 781, 10, "🏆"),
+    ("crown_win", 585, 15, "👑"),
+    ("sparkle_win", 390, 20, "💫"),
+    ("star_win", 293, 30, "🌟"),
+    ("diamond_jackpot", 195, 50, "💎"),
+    ("dragon_jackpot", 156, 80, "🐉"),
+    ("max_jackpot", 39, 120, "👑"),
 )
+SLOT_TIERS = tuple((tier, basis_points / SLOT_SCALE, payout) for tier, basis_points, payout, _ in SLOT_TIER_TABLE)
+SLOT_TIER_EMOJIS = {tier: emoji for tier, _, _, emoji in SLOT_TIER_TABLE}
 
 
 def parse_account_amount(prize_text: str) -> int | None:
@@ -48,13 +65,23 @@ def _now() -> str:
 
 
 def calculate_slot_outcome(roll: float) -> tuple[int, str]:
-    """Return (credits_won, tier) for a normalized roll in [0, 1)."""
-    cumulative = 0.0
-    for tier, probability, payout in SLOT_TIERS:
-        cumulative = round(cumulative + probability, 10)
-        if roll < cumulative:
+    """Return (credits_won, tier) for a normalized roll in [0, 1).
+
+    The production table is stored in basis points so the requested fractional
+    odds (including 0.16% and 0.04%) sum to exactly 100.00% without float drift.
+    """
+    if roll < 0:
+        bucket = 0
+    elif roll >= 1:
+        bucket = SLOT_SCALE - 1
+    else:
+        bucket = int(roll * SLOT_SCALE)
+    cumulative = 0
+    for tier, basis_points, payout, _emoji in SLOT_TIER_TABLE:
+        cumulative += basis_points
+        if bucket < cumulative:
             return payout, tier
-    return SLOT_TIERS[-1][2], SLOT_TIERS[-1][0]
+    return SLOT_TIER_TABLE[-1][2], SLOT_TIER_TABLE[-1][0]
 
 
 class DirectDeliveryService:
@@ -305,9 +332,9 @@ class DirectDeliveryService:
                 conn.commit()
                 return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": withdrawable_balance, "promotional_balance": promotional_balance, "playable_balance": playable_balance}
             DirectDeliveryService._subtract_credits(conn, telegram_id, 1, source)
-            r = (secrets.randbelow(1000) / 1000) if roll is None else roll
-            # Probability buckets total 100.0% exactly:
-            # 50% lose, 30% small win, 13% medium win, 5% big win, 2% jackpot.
+            r = (secrets.randbelow(SLOT_SCALE) / SLOT_SCALE) if roll is None else roll
+            # Probability buckets total exactly 100.00% with 60% loss
+            # and the requested winning tier weights scaled into a 40% win bucket.
             won, tier = calculate_slot_outcome(r)
             if won:
                 DirectDeliveryService._add_game_credits(conn, telegram_id, won, "slots_win", username, "withdrawable")
@@ -317,16 +344,17 @@ class DirectDeliveryService:
             )
             new_balance = DirectDeliveryService.get_pending_amount(telegram_id)
             new_promotional = DirectDeliveryService.get_promotional_amount(telegram_id)
-            DirectDeliveryService._log_game(conn, telegram_id, username, "/slots", 1, won, 0 if won else 1, new_balance, tier, f"source={source}; promotional_balance={new_promotional}")
+            new_playable = new_balance + new_promotional
+            DirectDeliveryService._log_game(conn, telegram_id, username, "/slots", 1, won, 0 if won else 1, new_playable, tier, f"source={source}; withdrawable_balance={new_balance}; promotional_balance={new_promotional}")
             conn.commit()
             audit_log.log(
                 action="SLOTS_PLAYED",
                 actor_id=telegram_id,
                 actor_name=username,
-                details=f"Wagered: 1, Source: {source}, Won: {won}, Result: {tier}, Withdrawable balance: {new_balance}, Promotional balance: {new_promotional}",
+                details=f"Wagered: 1, Source: {source}, Won: {won}, Result: {tier}, New playable balance: {new_playable}, Withdrawable balance: {new_balance}, Promotional balance: {new_promotional}",
                 result="SUCCESS",
             )
-            return {"success": True, "won": won, "tier": tier, "balance": new_balance, "withdrawable_balance": new_balance, "promotional_balance": new_promotional, "wager_source": source}
+            return {"success": True, "won": won, "tier": tier, "emoji": SLOT_TIER_EMOJIS.get(tier, "💎"), "balance": new_playable, "playable_balance": new_playable, "withdrawable_balance": new_balance, "promotional_balance": new_promotional, "wager_source": source}
         except Exception as exc:
             logger.error("Slots play failed: %s", exc)
             try:

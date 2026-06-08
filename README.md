@@ -198,7 +198,7 @@ This is a free bonus credit system only. Users must never deposit money, pay to 
 - `/start` and ordinary DMs do **not** deliver accounts automatically.
 - Users claim accounts only with `/claim` or `/withdraw`.
 - `/claim` and `/withdraw` deliver by DM only, subtract credits only after the DM succeeds, and prefer partial fulfillment if stock is low.
-- `/slots` costs exactly 1 unclaimed credit per spin and uses a 50/50 win-rate table: 50% lose, 30% small win (1 credit), 13% medium win (3 credits), 5% big win (6 credits), 2% jackpot win (80 credits).
+- `/slots` costs exactly 1 unclaimed credit per spin. It uses the current 60% loss / 40% win table with weighted prize tiers from 1 credit through the rare 120-credit max jackpot; users rerun `/slots` for each spin and no accounts are sent from slots.
 - `/coinflip heads|tails` costs exactly 1 unclaimed credit and is a true 50% win / 50% lose game.
 - `/balance`, `/bet`, and `/leaderboard` show/manage free credits without exposing account credentials.
 
