@@ -7,7 +7,7 @@ only through explicit /claim or /withdraw flows. Event credits are promotional: 
 """
 
 import logging
-import random
+import secrets
 import re
 from datetime import datetime
 
@@ -20,7 +20,15 @@ OUT_OF_CREDITS_MESSAGE = "You are out of credits. Win or receive more unclaimed 
 CLAIM_DM_FAILURE_MESSAGE = "Please open the bot in private messages first, then rerun /claim."
 NO_UNCLAIMED_MESSAGE = "You have no unclaimed accounts available."
 PROMOTIONAL_WITHDRAW_MESSAGE = "Event promotional credits cannot be withdrawn directly. Use them in /slots or /coinflip first; only winnings become withdrawable credits."
-SLOTS_NOTE = "Slots uses 1 credit per spin. Run /slots again to spin another credit."
+SLOTS_NOTE = "Slots uses 1 credit per spin with 50% win / 50% lose odds. Run /slots again to spin another credit."
+COINFLIP_WIN_PROBABILITY = 0.50
+SLOT_TIERS = (
+    ("lose", 0.50, 0),
+    ("small_win", 0.30, 1),
+    ("medium_win", 0.13, 3),
+    ("big_win", 0.05, 6),
+    ("jackpot_win", 0.02, 80),
+)
 
 
 def parse_account_amount(prize_text: str) -> int | None:
@@ -37,6 +45,16 @@ def parse_account_amount(prize_text: str) -> int | None:
 
 def _now() -> str:
     return datetime.utcnow().isoformat()
+
+
+def calculate_slot_outcome(roll: float) -> tuple[int, str]:
+    """Return (credits_won, tier) for a normalized roll in [0, 1)."""
+    cumulative = 0.0
+    for tier, probability, payout in SLOT_TIERS:
+        cumulative = round(cumulative + probability, 10)
+        if roll < cumulative:
+            return payout, tier
+    return SLOT_TIERS[-1][2], SLOT_TIERS[-1][0]
 
 
 class DirectDeliveryService:
@@ -287,29 +305,10 @@ class DirectDeliveryService:
                 conn.commit()
                 return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": withdrawable_balance, "promotional_balance": promotional_balance, "playable_balance": playable_balance}
             DirectDeliveryService._subtract_credits(conn, telegram_id, 1, source)
-            r = random.random() if roll is None else roll
-            # Probability buckets total 100.0%: 66, 18.9, 7, 5, 2, 1, 0.1.
-            if r < 0.66:
-                won = 0
-                tier = "lose"
-            elif r < 0.849:
-                won = 1
-                tier = "win_1"
-            elif r < 0.919:
-                won = 2
-                tier = "win_2"
-            elif r < 0.969:
-                won = 3
-                tier = "win_3"
-            elif r < 0.989:
-                won = 6
-                tier = "win_6"
-            elif r < 0.999:
-                won = 20
-                tier = "mega_20"
-            else:
-                won = 80
-                tier = "ultra_80"
+            r = (secrets.randbelow(1000) / 1000) if roll is None else roll
+            # Probability buckets total 100.0% exactly:
+            # 50% lose, 30% small win, 13% medium win, 5% big win, 2% jackpot.
+            won, tier = calculate_slot_outcome(r)
             if won:
                 DirectDeliveryService._add_game_credits(conn, telegram_id, won, "slots_win", username, "withdrawable")
             conn.execute(
@@ -353,8 +352,8 @@ class DirectDeliveryService:
                 conn.commit()
                 return {"success": False, "message": OUT_OF_CREDITS_MESSAGE, "balance": withdrawable_balance, "promotional_balance": promotional_balance, "playable_balance": playable_balance}
             DirectDeliveryService._subtract_credits(conn, telegram_id, 1, source)
-            r = random.random() if roll is None else roll
-            won = r < 0.40
+            r = (secrets.randbelow(2) / 2) if roll is None else roll
+            won = r < COINFLIP_WIN_PROBABILITY
             payout = 2 if won else 0
             credited = 1 if (won and source == "promotional") else payout
             if credited:

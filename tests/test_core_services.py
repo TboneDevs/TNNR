@@ -983,11 +983,11 @@ def test_balance_bet_slots_and_coinflip_credit_safety(tmp_path, monkeypatch):
     asyncio.run(bet(update, context))
     assert "Bet amount saved" in message.replies[-1]
 
-    # Exercise deterministic service-level odds: lose then 6-credit win.
-    lost = direct_delivery_service.play_slots(1300, "player", roll=0.50)
+    # Exercise deterministic service-level odds: lose then big 6-credit win.
+    lost = direct_delivery_service.play_slots(1300, "player", roll=0.49)
     assert lost["won"] == 0 and lost["balance"] == 1 and lost["promotional_balance"] == 0
-    win = direct_delivery_service.play_slots(1300, "player", roll=0.98)
-    assert win["won"] == 6 and win["balance"] == 6 and win["wager_source"] == "withdrawable"
+    win = direct_delivery_service.play_slots(1300, "player", roll=0.95)
+    assert win["won"] == 6 and win["tier"] == "big_win" and win["balance"] == 6 and win["wager_source"] == "withdrawable"
 
     cf_loss = direct_delivery_service.play_coinflip(1300, "heads", "player", roll=0.90)
     assert cf_loss["won"] is False and cf_loss["balance"] == 5
@@ -995,6 +995,32 @@ def test_balance_bet_slots_and_coinflip_credit_safety(tmp_path, monkeypatch):
     assert cf_win["won"] is True and cf_win["balance"] == 6
     assert direct_delivery_service.get_pending_amount(1300) == 6
     assert db.execute_one("SELECT COUNT(*) FROM account_pool WHERE status = 'delivered'")[0] == 0
+
+
+def test_game_odds_tables_are_50_50():
+    from services.direct_delivery_service import (
+        COINFLIP_WIN_PROBABILITY,
+        SLOT_TIERS,
+        calculate_slot_outcome,
+    )
+
+    assert COINFLIP_WIN_PROBABILITY == 0.50
+    assert sum(probability for _, probability, _ in SLOT_TIERS) == 1.0
+    assert SLOT_TIERS == (
+        ("lose", 0.50, 0),
+        ("small_win", 0.30, 1),
+        ("medium_win", 0.13, 3),
+        ("big_win", 0.05, 6),
+        ("jackpot_win", 0.02, 80),
+    )
+    assert calculate_slot_outcome(0.49) == (0, "lose")
+    assert calculate_slot_outcome(0.50) == (1, "small_win")
+    assert calculate_slot_outcome(0.79) == (1, "small_win")
+    assert calculate_slot_outcome(0.80) == (3, "medium_win")
+    assert calculate_slot_outcome(0.92) == (3, "medium_win")
+    assert calculate_slot_outcome(0.93) == (6, "big_win")
+    assert calculate_slot_outcome(0.97) == (6, "big_win")
+    assert calculate_slot_outcome(0.98) == (80, "jackpot_win")
 
 
 def test_claim_withdraw_partial_and_dm_failure_safety(tmp_path, monkeypatch):
@@ -1176,14 +1202,15 @@ def test_promotional_event_credits_cannot_be_withdrawn_and_convert_only_winnings
     asyncio.run(withdraw(update, context))
     assert message.replies[-1] == PROMOTIONAL_WITHDRAW_MESSAGE
 
-    lost = direct_delivery_service.play_slots(1900, "promo", roll=0.50)
+    lost = direct_delivery_service.play_slots(1900, "promo", roll=0.49)
     assert lost["wager_source"] == "promotional"
     assert lost["promotional_balance"] == 2
     assert lost["withdrawable_balance"] == 0
 
-    won = direct_delivery_service.play_slots(1900, "promo", roll=0.98)
+    won = direct_delivery_service.play_slots(1900, "promo", roll=0.95)
     assert won["wager_source"] == "promotional"
     assert won["won"] == 6
+    assert won["tier"] == "big_win"
     assert won["promotional_balance"] == 1
     assert won["withdrawable_balance"] == 6
 
